@@ -421,6 +421,36 @@ databases:
 	}
 }
 
+func TestEnvVarExpansionInStrategy(t *testing.T) {
+	t.Setenv("TEST_STRATEGY", "create")
+
+	yaml := `
+strategy: "${TEST_STRATEGY}"
+roles:
+  - name: "user1"
+    password: "pass"
+    strategy: "${TEST_STRATEGY}"
+databases:
+  - name: "db1"
+    owner: "user1"
+    strategy: "${TEST_STRATEGY}"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Strategy != "create" {
+		t.Errorf("expected global strategy 'create', got %q", cfg.Strategy)
+	}
+	if cfg.Roles[0].Strategy != "create" {
+		t.Errorf("expected role strategy 'create', got %q", cfg.Roles[0].Strategy)
+	}
+	if cfg.Databases[0].Strategy != "create" {
+		t.Errorf("expected database strategy 'create', got %q", cfg.Databases[0].Strategy)
+	}
+}
+
 func TestEffectiveStrategy(t *testing.T) {
 	tests := []struct {
 		name       string

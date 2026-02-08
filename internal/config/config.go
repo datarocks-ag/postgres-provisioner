@@ -123,12 +123,15 @@ func expandEnvVars(s string) string {
 
 // expandConfig walks the config and expands env vars in string fields.
 func expandConfig(cfg *Config) {
+	cfg.Strategy = expandEnvVars(cfg.Strategy)
 	for i := range cfg.Roles {
 		cfg.Roles[i].Name = expandEnvVars(cfg.Roles[i].Name)
 		cfg.Roles[i].Password = expandEnvVars(cfg.Roles[i].Password)
+		cfg.Roles[i].Strategy = expandEnvVars(cfg.Roles[i].Strategy)
 	}
 	for i := range cfg.Databases {
 		cfg.Databases[i].Name = expandEnvVars(cfg.Databases[i].Name)
+		cfg.Databases[i].Strategy = expandEnvVars(cfg.Databases[i].Strategy)
 		cfg.Databases[i].Owner = expandEnvVars(cfg.Databases[i].Owner)
 		for j := range cfg.Databases[i].Extensions {
 			cfg.Databases[i].Extensions[j] = expandEnvVars(cfg.Databases[i].Extensions[j])
