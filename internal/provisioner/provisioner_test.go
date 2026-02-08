@@ -33,7 +33,7 @@ func TestEnsureRoleCreate(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role); err != nil {
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -63,7 +63,36 @@ func TestEnsureRoleAlter(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role); err != nil {
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureRoleCreateStrategySkipsExisting(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	role := config.Role{
+		Name:     "existing",
+		Password: "newpass",
+	}
+
+	// Role exists
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("existing").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	// No ALTER expected — strategy=create skips update
+
+	p := &Provisioner{adminDB: mockDB}
+	if err := p.ensureRole(context.Background(), role, "create"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -92,7 +121,7 @@ func TestEnsureDatabaseCreate(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureDatabase(context.Background(), database); err != nil {
+	if err := p.ensureDatabase(context.Background(), database, "update"); err != nil {
 		t.Fatalf("ensureDatabase: %v", err)
 	}
 
@@ -121,7 +150,35 @@ func TestEnsureDatabaseExists(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureDatabase(context.Background(), database); err != nil {
+	if err := p.ensureDatabase(context.Background(), database, "update"); err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureDatabaseCreateStrategySkipsExisting(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:  "existingdb",
+		Owner: "owner",
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("existingdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	// No ALTER expected — strategy=create skips update
+
+	p := &Provisioner{adminDB: mockDB}
+	if err := p.ensureDatabase(context.Background(), database, "create"); err != nil {
 		t.Fatalf("ensureDatabase: %v", err)
 	}
 
@@ -164,7 +221,30 @@ func TestEnsureSchema(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{}
-	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser"); err != nil {
+	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "update"); err != nil {
+		t.Fatalf("ensureSchema: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureSchemaCreateStrategySkipsOwner(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// CREATE SCHEMA always runs
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// No ALTER SCHEMA OWNER expected — strategy=create skips owner update
+
+	p := &Provisioner{}
+	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "create"); err != nil {
 		t.Fatalf("ensureSchema: %v", err)
 	}
 
@@ -341,12 +421,14 @@ func TestRunFullProvisioning(t *testing.T) {
 
 	ctx := context.Background()
 	for _, role := range cfg.Roles {
-		if err := p.ensureRole(ctx, role); err != nil {
+		strategy := config.EffectiveStrategy(role.Strategy, cfg.Strategy)
+		if err := p.ensureRole(ctx, role, strategy); err != nil {
 			t.Fatalf("ensureRole: %v", err)
 		}
 	}
 	for _, database := range cfg.Databases {
-		if err := p.ensureDatabase(ctx, database); err != nil {
+		strategy := config.EffectiveStrategy(database.Strategy, cfg.Strategy)
+		if err := p.ensureDatabase(ctx, database, strategy); err != nil {
 			t.Fatalf("ensureDatabase: %v", err)
 		}
 	}

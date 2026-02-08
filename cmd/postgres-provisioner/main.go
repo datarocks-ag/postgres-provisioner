@@ -12,8 +12,11 @@ import (
 	"postgres-provisioner/internal/provisioner"
 )
 
+var version = "dev"
+
 func main() {
 	setupLogging()
+	slog.Info("Starting postgres-provisioner", "version", version)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

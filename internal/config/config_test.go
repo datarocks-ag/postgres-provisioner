@@ -357,6 +357,92 @@ roles:
 	}
 }
 
+func TestValidationInvalidGlobalStrategy(t *testing.T) {
+	yaml := `
+strategy: "invalid"
+roles:
+  - name: "user1"
+    password: "pass"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid global strategy")
+	}
+}
+
+func TestValidationInvalidRoleStrategy(t *testing.T) {
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+    strategy: "invalid"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid role strategy")
+	}
+}
+
+func TestValidationInvalidDatabaseStrategy(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+    strategy: "invalid"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid database strategy")
+	}
+}
+
+func TestValidStrategies(t *testing.T) {
+	for _, strategy := range []string{"create", "update"} {
+		t.Run(strategy, func(t *testing.T) {
+			yaml := fmt.Sprintf(`
+strategy: %q
+roles:
+  - name: "user1"
+    password: "pass"
+    strategy: %q
+databases:
+  - name: "db1"
+    owner: "user1"
+    strategy: %q
+`, strategy, strategy, strategy)
+			path := writeTempConfig(t, yaml)
+			_, err := Load(path)
+			if err != nil {
+				t.Fatalf("unexpected error for strategy %q: %v", strategy, err)
+			}
+		})
+	}
+}
+
+func TestEffectiveStrategy(t *testing.T) {
+	tests := []struct {
+		name       string
+		strategies []string
+		want       string
+	}{
+		{"all empty defaults to update", []string{"", ""}, "update"},
+		{"first wins", []string{"create", "update"}, "create"},
+		{"fallback to second", []string{"", "create"}, "create"},
+		{"single empty", []string{""}, "update"},
+		{"single set", []string{"create"}, "create"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EffectiveStrategy(tt.strategies...)
+			if got != tt.want {
+				t.Errorf("EffectiveStrategy(%v) = %q, want %q", tt.strategies, got, tt.want)
+			}
+		})
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()

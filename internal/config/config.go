@@ -29,6 +29,24 @@ var validPrivileges = map[string]bool{
 	"EXECUTE":    true,
 }
 
+// validStrategies is the allowlist of update strategy values.
+var validStrategies = map[string]bool{
+	"":       true, // inherits from parent/default
+	"create": true, // only create if missing, skip if exists
+	"update": true, // create or update (default behavior)
+}
+
+// EffectiveStrategy returns the first non-empty strategy from the given list,
+// defaulting to "update" if all are empty.
+func EffectiveStrategy(strategies ...string) string {
+	for _, s := range strategies {
+		if s != "" {
+			return s
+		}
+	}
+	return "update"
+}
+
 // reservedDatabases are system databases that must not be provisioned.
 var reservedDatabases = map[string]bool{
 	"template0": true,
@@ -55,6 +73,7 @@ type Role struct {
 	Name     string      `yaml:"name"`
 	Password string      `yaml:"password"`
 	Options  RoleOptions `yaml:"options"`
+	Strategy string      `yaml:"strategy"`
 }
 
 // Grant defines a privilege grant.
@@ -79,10 +98,12 @@ type Database struct {
 	Extensions []string `yaml:"extensions"`
 	Schemas    []Schema `yaml:"schemas"`
 	Grants     []Grant  `yaml:"grants"`
+	Strategy   string   `yaml:"strategy"`
 }
 
 // Config is the top-level YAML configuration.
 type Config struct {
+	Strategy  string     `yaml:"strategy"`
 	Roles     []Role     `yaml:"roles"`
 	Databases []Database `yaml:"databases"`
 }
@@ -158,10 +179,25 @@ func checkNullBytes(fields ...struct{ path, value string }) error {
 	return nil
 }
 
+// validateStrategy returns an error if the strategy value is invalid.
+func validateStrategy(path, value string) error {
+	if !validStrategies[value] {
+		return fmt.Errorf("%s: invalid strategy %q (must be \"create\" or \"update\")", path, value)
+	}
+	return nil
+}
+
 // validate checks the config for required fields and consistency.
 func validate(cfg *Config) error {
+	if err := validateStrategy("strategy", cfg.Strategy); err != nil {
+		return err
+	}
+
 	roleNames := make(map[string]bool)
 	for i, r := range cfg.Roles {
+		if err := validateStrategy(fmt.Sprintf("roles[%d].strategy", i), r.Strategy); err != nil {
+			return err
+		}
 		if r.Name == "" {
 			return fmt.Errorf("roles[%d]: name is required", i)
 		}
@@ -182,6 +218,9 @@ func validate(cfg *Config) error {
 
 	dbNames := make(map[string]bool)
 	for i, d := range cfg.Databases {
+		if err := validateStrategy(fmt.Sprintf("databases[%d].strategy", i), d.Strategy); err != nil {
+			return err
+		}
 		if d.Name == "" {
 			return fmt.Errorf("databases[%d]: name is required", i)
 		}
