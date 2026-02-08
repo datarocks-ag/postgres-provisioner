@@ -6,15 +6,16 @@ import (
 	"log/slog"
 )
 
-func (p *Provisioner) ensureSchema(ctx context.Context, dbConn *sql.DB, name, owner string) error {
-	slog.Info("Ensuring schema", "schema", name, "owner", owner)
+func (p *Provisioner) ensureSchema(ctx context.Context, dbConn *sql.DB, name, owner, strategy string) error {
+	slog.Info("Ensuring schema", "schema", name, "owner", owner, "strategy", strategy)
 
 	query := "CREATE SCHEMA IF NOT EXISTS " + quoteIdentifier(name)
 	if _, err := dbConn.ExecContext(ctx, query); err != nil {
 		return err
 	}
 
-	if owner != "" {
+	// Only update owner if strategy is "update"
+	if strategy != "create" && owner != "" {
 		query = "ALTER SCHEMA " + quoteIdentifier(name) + " OWNER TO " + quoteIdentifier(owner)
 		if _, err := dbConn.ExecContext(ctx, query); err != nil {
 			return err

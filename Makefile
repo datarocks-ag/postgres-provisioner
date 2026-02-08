@@ -1,4 +1,4 @@
-.PHONY: build test test-integration lint vet docker clean
+.PHONY: build test test-integration lint vet fmt mod-tidy docker clean
 
 BINARY := postgres-provisioner
 
@@ -12,10 +12,16 @@ test-integration:
 	go test -race -tags=integration -v ./...
 
 lint:
-	golangci-lint run
+	go tool golangci-lint run
 
 vet:
 	go vet ./...
+
+fmt:
+	go fmt ./...
+
+mod-tidy:
+	go mod tidy
 
 docker:
 	docker build -t $(BINARY) .

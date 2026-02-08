@@ -62,4 +62,5 @@ Go 1.25 module using:
 - **Per-database connections**: Extensions/schemas/grants connect to each target database
 - **SQL injection prevention**: `quoteIdentifier()` and `quoteLiteral()` helpers
 - **Structured logging**: `log/slog` with JSON output
+- **Strategy**: `update` (default) or `create` (skip existing). Per-resource overrides global.
 - **Connection retry**: Exponential backoff (1s–30s, 15 retries, 5min timeout)

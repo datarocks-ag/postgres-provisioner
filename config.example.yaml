@@ -2,6 +2,11 @@
 #
 # Environment variable interpolation: use ${VAR_NAME} syntax.
 # Unresolved variables are left as-is (useful for detecting misconfig).
+#
+# Strategy: "update" (default) creates or updates resources.
+#           "create" only creates if missing, skips existing.
+# Set globally or per resource (resource strategy overrides global).
+# strategy: "update"
 
 roles:
   - name: "app_user"
