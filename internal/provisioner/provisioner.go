@@ -43,12 +43,17 @@ func (p *Provisioner) Run(ctx context.Context) error {
 	// 2. Databases, then per-database resources
 	for _, database := range p.cfg.Databases {
 		dbStrategy := config.EffectiveStrategy(database.Strategy, p.cfg.Strategy)
-		if err := p.ensureDatabase(ctx, database, dbStrategy); err != nil {
+		created, err := p.ensureDatabase(ctx, database, dbStrategy)
+		if err != nil {
 			return fmt.Errorf("provisioning database %q: %w", database.Name, err)
 		}
 
-		// Always connect to the target database for extensions/schemas/grants
-		// (children are always processed regardless of parent strategy)
+		// strategy=create: only provision sub-resources for newly created databases
+		if dbStrategy == "create" && !created {
+			slog.Info("Skipping sub-resources for existing database (strategy=create)", "database", database.Name)
+			continue
+		}
+
 		dbConn, err := db.ConnectToDatabase(ctx, p.connCfg, database.Name)
 		if err != nil {
 			return fmt.Errorf("connecting to database %q: %w", database.Name, err)
