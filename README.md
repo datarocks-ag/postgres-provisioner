@@ -4,12 +4,18 @@ A Go CLI tool that idempotently provisions PostgreSQL resources (roles, database
 
 ## Quick Start
 
-```bash
-# Build
-go build -o postgres-provisioner ./cmd/postgres-provisioner
-
-# Or use Docker Compose
-docker compose up
+```yaml
+# docker-compose.yaml
+services:
+  postgres-provisioner:
+    image: ghcr.io/datarocks-ag/postgres-provisioner:latest
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpass
+      POSTGRES_HOST: postgres
+      PGHELPER_CONFIG_PATH: /config.yaml
+    volumes:
+      - ./config.yaml:/config.yaml:ro
 ```
 
 ## Configuration
@@ -101,7 +107,7 @@ services:
       retries: 10
 
   postgres-provisioner:
-    build: .
+    image: ghcr.io/datarocks-ag/postgres-provisioner:latest
     depends_on:
       postgres:
         condition: service_healthy
