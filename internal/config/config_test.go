@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,6 +130,9 @@ databases:
 
 func TestValidationGrantMissingTarget(t *testing.T) {
 	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
 databases:
   - name: "db1"
     grants:
@@ -144,6 +148,9 @@ databases:
 
 func TestValidationGrantMultipleTargets(t *testing.T) {
 	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
 databases:
   - name: "db1"
     grants:
@@ -182,6 +189,171 @@ func TestEmptyConfig(t *testing.T) {
 	}
 	if len(cfg.Roles) != 0 || len(cfg.Databases) != 0 {
 		t.Error("expected empty roles and databases")
+	}
+}
+
+func TestValidationInvalidPrivilege(t *testing.T) {
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+databases:
+  - name: "db1"
+    grants:
+      - role: "user1"
+        privileges: ["SELECT; DROP TABLE foo --"]
+        on_database: true
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid privilege")
+	}
+}
+
+func TestValidationValidPrivileges(t *testing.T) {
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+databases:
+  - name: "db1"
+    grants:
+      - role: "user1"
+        privileges: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+        on_database: true
+      - role: "user1"
+        privileges: ["ALL"]
+        on_schema: "public"
+      - role: "user1"
+        privileges: ["usage", "create"]
+        on_schema: "public"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error for valid privileges: %v", err)
+	}
+}
+
+func TestValidationNullByteInName(t *testing.T) {
+	yaml := "roles:\n  - name: \"user\\x00evil\"\n    password: \"pass\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in role name")
+	}
+}
+
+func TestValidationGrantRoleNotDeclared(t *testing.T) {
+	yaml := `
+roles:
+  - name: "declared"
+    password: "pass"
+databases:
+  - name: "db1"
+    grants:
+      - role: "undeclared"
+        privileges: ["SELECT"]
+        on_database: true
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for undeclared grant role")
+	}
+}
+
+func TestValidationDatabaseOwnerNotDeclared(t *testing.T) {
+	yaml := `
+roles:
+  - name: "existing"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "nonexistent"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for undeclared database owner")
+	}
+}
+
+func TestValidationSchemaOwnerNotDeclared(t *testing.T) {
+	yaml := `
+roles:
+  - name: "existing"
+    password: "pass"
+databases:
+  - name: "db1"
+    schemas:
+      - name: "app"
+        owner: "nonexistent"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for undeclared schema owner")
+	}
+}
+
+func TestValidationEmptyExtensionName(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+    extensions: [""]
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for empty extension name")
+	}
+}
+
+func TestValidationDuplicateSchemaName(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+    schemas:
+      - name: "app"
+      - name: "app"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for duplicate schema name")
+	}
+}
+
+func TestValidationReservedDatabaseName(t *testing.T) {
+	for _, name := range []string{"template0", "template1", "postgres"} {
+		t.Run(name, func(t *testing.T) {
+			yaml := fmt.Sprintf(`
+databases:
+  - name: %q
+`, name)
+			path := writeTempConfig(t, yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected validation error for reserved database name %q", name)
+			}
+		})
+	}
+}
+
+func TestValidationInvalidConnectionLimit(t *testing.T) {
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+    options:
+      connection_limit: -2
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for connection_limit < -1")
 	}
 }
 
