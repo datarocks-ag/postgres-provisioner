@@ -1,0 +1,45 @@
+# postgres-provisioner configuration example
+#
+# Environment variable interpolation: use ${VAR_NAME} syntax.
+# Unresolved variables are left as-is (useful for detecting misconfig).
+
+roles:
+  - name: "app_user"
+    password: "${APP_DB_PASSWORD}"     # resolved from environment
+    options:
+      login: true
+      superuser: false
+      createdb: false
+      createrole: false
+      connection_limit: -1             # unlimited
+
+  - name: "readonly_user"
+    password: "${READONLY_DB_PASSWORD}"
+    options:
+      login: true
+
+databases:
+  - name: "myapp"
+    owner: "app_user"
+    extensions:
+      - "uuid-ossp"
+      - "pgcrypto"
+    schemas:
+      - name: "app"
+        owner: "app_user"             # optional, defaults to database owner
+    grants:
+      - role: "app_user"
+        privileges: ["ALL"]
+        on_schema: "app"              # GRANT ALL ON SCHEMA app TO app_user
+
+      - role: "readonly_user"
+        privileges: ["CONNECT"]
+        on_database: true             # GRANT CONNECT ON DATABASE myapp TO readonly_user
+
+      - role: "readonly_user"
+        privileges: ["USAGE"]
+        on_schema: "app"              # GRANT USAGE ON SCHEMA app TO readonly_user
+
+      - role: "readonly_user"
+        privileges: ["SELECT"]
+        on_tables_in_schema: "app"    # GRANT SELECT ON ALL TABLES + ALTER DEFAULT PRIVILEGES
