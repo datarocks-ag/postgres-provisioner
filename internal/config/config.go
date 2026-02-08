@@ -4,9 +4,42 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// validPrivileges is the allowlist of PostgreSQL privilege keywords that may
+// appear in grant configurations. Anything else is rejected at validation time
+// to prevent SQL injection (privileges are interpolated unquoted into GRANT).
+var validPrivileges = map[string]bool{
+	"ALL":        true,
+	"SELECT":     true,
+	"INSERT":     true,
+	"UPDATE":     true,
+	"DELETE":     true,
+	"TRUNCATE":   true,
+	"REFERENCES": true,
+	"TRIGGER":    true,
+	"USAGE":      true,
+	"CREATE":     true,
+	"CONNECT":    true,
+	"TEMPORARY":  true,
+	"TEMP":       true,
+	"EXECUTE":    true,
+}
+
+// reservedDatabases are system databases that must not be provisioned.
+var reservedDatabases = map[string]bool{
+	"template0": true,
+	"template1": true,
+	"postgres":  true,
+}
+
+// containsNullByte returns true if s contains a null byte (\x00).
+func containsNullByte(s string) bool {
+	return strings.ContainsRune(s, '\x00')
+}
 
 // RoleOptions controls PostgreSQL role attributes.
 type RoleOptions struct {
@@ -115,12 +148,31 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// checkNullBytes returns an error if any of the given field/value pairs contain a null byte.
+func checkNullBytes(fields ...struct{ path, value string }) error {
+	for _, f := range fields {
+		if containsNullByte(f.value) {
+			return fmt.Errorf("%s: contains null byte", f.path)
+		}
+	}
+	return nil
+}
+
 // validate checks the config for required fields and consistency.
 func validate(cfg *Config) error {
 	roleNames := make(map[string]bool)
 	for i, r := range cfg.Roles {
 		if r.Name == "" {
 			return fmt.Errorf("roles[%d]: name is required", i)
+		}
+		if err := checkNullBytes(
+			struct{ path, value string }{fmt.Sprintf("roles[%d].name", i), r.Name},
+			struct{ path, value string }{fmt.Sprintf("roles[%d].password", i), r.Password},
+		); err != nil {
+			return err
+		}
+		if r.Options.ConnectionLimit != nil && *r.Options.ConnectionLimit < -1 {
+			return fmt.Errorf("roles[%d].options.connection_limit: must be >= -1, got %d", i, *r.Options.ConnectionLimit)
 		}
 		if roleNames[r.Name] {
 			return fmt.Errorf("roles[%d]: duplicate role name %q", i, r.Name)
@@ -133,14 +185,50 @@ func validate(cfg *Config) error {
 		if d.Name == "" {
 			return fmt.Errorf("databases[%d]: name is required", i)
 		}
+		if err := checkNullBytes(
+			struct{ path, value string }{fmt.Sprintf("databases[%d].name", i), d.Name},
+			struct{ path, value string }{fmt.Sprintf("databases[%d].owner", i), d.Owner},
+		); err != nil {
+			return err
+		}
+		if reservedDatabases[d.Name] {
+			return fmt.Errorf("databases[%d]: %q is a reserved database name", i, d.Name)
+		}
 		if dbNames[d.Name] {
 			return fmt.Errorf("databases[%d]: duplicate database name %q", i, d.Name)
 		}
 		dbNames[d.Name] = true
 
+		if d.Owner != "" && !roleNames[d.Owner] {
+			return fmt.Errorf("databases[%d].owner: role %q is not declared in roles", i, d.Owner)
+		}
+
+		for j, ext := range d.Extensions {
+			if ext == "" {
+				return fmt.Errorf("databases[%d].extensions[%d]: name must not be empty", i, j)
+			}
+			if containsNullByte(ext) {
+				return fmt.Errorf("databases[%d].extensions[%d]: contains null byte", i, j)
+			}
+		}
+
+		schemaNames := make(map[string]bool)
 		for j, s := range d.Schemas {
 			if s.Name == "" {
 				return fmt.Errorf("databases[%d].schemas[%d]: name is required", i, j)
+			}
+			if err := checkNullBytes(
+				struct{ path, value string }{fmt.Sprintf("databases[%d].schemas[%d].name", i, j), s.Name},
+				struct{ path, value string }{fmt.Sprintf("databases[%d].schemas[%d].owner", i, j), s.Owner},
+			); err != nil {
+				return err
+			}
+			if schemaNames[s.Name] {
+				return fmt.Errorf("databases[%d].schemas[%d]: duplicate schema name %q", i, j, s.Name)
+			}
+			schemaNames[s.Name] = true
+			if s.Owner != "" && !roleNames[s.Owner] {
+				return fmt.Errorf("databases[%d].schemas[%d].owner: role %q is not declared in roles", i, j, s.Owner)
 			}
 		}
 
@@ -148,8 +236,20 @@ func validate(cfg *Config) error {
 			if g.Role == "" {
 				return fmt.Errorf("databases[%d].grants[%d]: role is required", i, j)
 			}
+			if containsNullByte(g.Role) {
+				return fmt.Errorf("databases[%d].grants[%d].role: contains null byte", i, j)
+			}
+			if !roleNames[g.Role] {
+				return fmt.Errorf("databases[%d].grants[%d].role: role %q is not declared in roles", i, j, g.Role)
+			}
 			if len(g.Privileges) == 0 {
 				return fmt.Errorf("databases[%d].grants[%d]: privileges is required", i, j)
+			}
+			for k, priv := range g.Privileges {
+				normalized := strings.ToUpper(strings.TrimSpace(priv))
+				if !validPrivileges[normalized] {
+					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: invalid privilege %q", i, j, k, priv)
+				}
 			}
 			targets := 0
 			if g.OnSchema != "" {

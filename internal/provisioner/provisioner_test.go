@@ -270,6 +270,8 @@ func TestQuoteIdentifier(t *testing.T) {
 		{"simple", `"simple"`},
 		{`has"quote`, `"has""quote"`},
 		{"with space", `"with space"`},
+		{"", `""`},
+		{`back\slash`, `"back\slash"`},
 	}
 	for _, tt := range tests {
 		got := quoteIdentifier(tt.input)
@@ -286,6 +288,8 @@ func TestQuoteLiteral(t *testing.T) {
 		{"simple", `'simple'`},
 		{"it's", `'it''s'`},
 		{"has'two'quotes", `'has''two''quotes'`},
+		{"", `''`},
+		{`back\slash`, `'back\slash'`},
 	}
 	for _, tt := range tests {
 		got := quoteLiteral(tt.input)
