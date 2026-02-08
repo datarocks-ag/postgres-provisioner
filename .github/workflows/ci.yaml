@@ -17,9 +17,7 @@ jobs:
         with:
           go-version: "1.25"
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
+        run: go tool golangci-lint run
 
   test:
     runs-on: ubuntu-latest

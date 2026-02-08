@@ -1,11 +1,21 @@
+version: "2"
+
 linters:
   enable:
     - errcheck
     - govet
     - staticcheck
     - unused
-    - gosimple
     - ineffassign
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*net/http.Response).Body.Close
+        - (io.Closer).Close
+        - os.Unsetenv
 
 issues:
   exclude-dirs:

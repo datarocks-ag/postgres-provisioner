@@ -12,7 +12,7 @@ test-integration:
 	go test -race -tags=integration -v ./...
 
 lint:
-	golangci-lint run
+	go tool golangci-lint run
 
 vet:
 	go vet ./...
