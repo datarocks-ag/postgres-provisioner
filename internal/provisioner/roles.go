@@ -10,13 +10,17 @@ import (
 	"postgres-provisioner/internal/config"
 )
 
-func (p *Provisioner) ensureRole(ctx context.Context, role config.Role) error {
+func (p *Provisioner) ensureRole(ctx context.Context, role config.Role, strategy string) error {
 	exists, err := roleExists(ctx, p.adminDB, role.Name)
 	if err != nil {
 		return err
 	}
 
 	if exists {
+		if strategy == "create" {
+			slog.Info("Skipping existing role (strategy=create)", "role", role.Name)
+			return nil
+		}
 		slog.Info("Role already exists, updating", "role", role.Name)
 		return alterRole(ctx, p.adminDB, role)
 	}
@@ -49,16 +53,20 @@ func createRole(ctx context.Context, db *sql.DB, role config.Role) error {
 }
 
 func alterRole(ctx context.Context, db *sql.DB, role config.Role) error {
-	var parts []string
-	parts = append(parts, "ALTER ROLE "+quoteIdentifier(role.Name)+" WITH")
+	var clauses []string
 
 	if role.Password != "" {
-		parts = append(parts, "PASSWORD "+quoteLiteral(role.Password))
+		clauses = append(clauses, "PASSWORD "+quoteLiteral(role.Password))
 	}
 
-	parts = append(parts, roleOptionsClauses(role.Options)...)
+	clauses = append(clauses, roleOptionsClauses(role.Options)...)
 
-	query := strings.Join(parts, " ")
+	if len(clauses) == 0 {
+		slog.Info("No changes to apply for role", "role", role.Name)
+		return nil
+	}
+
+	query := "ALTER ROLE " + quoteIdentifier(role.Name) + " WITH " + strings.Join(clauses, " ")
 	_, err := db.ExecContext(ctx, query)
 	return err
 }

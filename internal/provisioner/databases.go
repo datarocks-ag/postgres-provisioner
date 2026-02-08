@@ -8,13 +8,17 @@ import (
 	"postgres-provisioner/internal/config"
 )
 
-func (p *Provisioner) ensureDatabase(ctx context.Context, database config.Database) error {
+func (p *Provisioner) ensureDatabase(ctx context.Context, database config.Database, strategy string) error {
 	exists, err := databaseExists(ctx, p.adminDB, database.Name)
 	if err != nil {
 		return err
 	}
 
 	if exists {
+		if strategy == "create" {
+			slog.Info("Skipping existing database (strategy=create)", "database", database.Name)
+			return nil
+		}
 		slog.Info("Database already exists", "database", database.Name)
 		if database.Owner != "" {
 			return alterDatabaseOwner(ctx, p.adminDB, database.Name, database.Owner)

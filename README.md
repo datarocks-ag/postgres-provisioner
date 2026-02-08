@@ -62,19 +62,49 @@ databases:
 | `PGHELPER_CONFIG_PATH` | no | `./config.yaml` | Path to YAML config |
 | `LOG_LEVEL` | no | `info` | Log level (debug/info/warn/error) |
 
+## Strategy
+
+Control whether existing resources are updated or skipped using the `strategy` field:
+
+- `update` (default) — create resources if missing, update if they already exist
+- `create` — create resources if missing, skip if they already exist
+
+Strategy can be set globally or per resource. Per-resource strategy overrides the global setting.
+
+```yaml
+strategy: "create"           # global default: skip existing resources
+
+roles:
+  - name: "app_user"
+    strategy: "update"       # override: always reconcile this role
+    password: "${APP_DB_PASSWORD}"
+```
+
+## Environment Variable Expansion
+
+String values support `${VAR}` syntax. If the variable is set in the environment, it is replaced; if unset, the placeholder is preserved as-is (useful for detecting misconfigurations).
+
+```yaml
+password: "${APP_DB_PASSWORD}"    # replaced with env var value at load time
+```
+
 ## Provisioning Order
 
 1. **Roles** — created or updated idempotently
 2. **Databases** — created idempotently, owner set
 3. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
-4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database)
-5. **Grants** — `GRANT` statements are inherently idempotent (per-database)
+4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
+5. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
 
 ## Grant Types
 
 - `on_database: true` — grants privileges on the database itself (e.g., `CONNECT`)
 - `on_schema: "name"` — grants privileges on a schema (e.g., `ALL`, `USAGE`)
 - `on_tables_in_schema: "name"` — grants on all existing tables + sets `ALTER DEFAULT PRIVILEGES` for future tables
+
+## SSL Mode
+
+Set `POSTGRES_SSLMODE` to control connection encryption. Defaults to `disable` for local development. For production, use `require`, `verify-ca`, or `verify-full`. See [PostgreSQL SSL documentation](https://www.postgresql.org/docs/current/libpq-ssl.html).
 
 ## Connection Retry
 
