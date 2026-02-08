@@ -67,7 +67,9 @@ databases:
 Control whether existing resources are updated or skipped using the `strategy` field:
 
 - `update` (default) — create resources if missing, update if they already exist
-- `create` — create resources if missing, skip if they already exist
+- `create` — create resources if missing, skip if they already exist. For databases,
+  this also skips all sub-resources (extensions, schemas, grants) if the database
+  already exists.
 
 Strategy can be set globally or per resource. Per-resource strategy overrides the global setting.
 

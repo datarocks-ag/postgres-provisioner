@@ -121,8 +121,12 @@ func TestEnsureDatabaseCreate(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureDatabase(context.Background(), database, "update"); err != nil {
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
 		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true for new database")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -150,8 +154,12 @@ func TestEnsureDatabaseExists(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureDatabase(context.Background(), database, "update"); err != nil {
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
 		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false for existing database")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -178,8 +186,12 @@ func TestEnsureDatabaseCreateStrategySkipsExisting(t *testing.T) {
 	// No ALTER expected — strategy=create skips update
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureDatabase(context.Background(), database, "create"); err != nil {
+	created, err := p.ensureDatabase(context.Background(), database, "create")
+	if err != nil {
 		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false for existing database with strategy=create")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -428,7 +440,7 @@ func TestRunFullProvisioning(t *testing.T) {
 	}
 	for _, database := range cfg.Databases {
 		strategy := config.EffectiveStrategy(database.Strategy, cfg.Strategy)
-		if err := p.ensureDatabase(ctx, database, strategy); err != nil {
+		if _, err := p.ensureDatabase(ctx, database, strategy); err != nil {
 			t.Fatalf("ensureDatabase: %v", err)
 		}
 	}
