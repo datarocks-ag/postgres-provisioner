@@ -16,7 +16,7 @@ services:
       retries: 10
 
   postgres-provisioner:
-    build: .
+    image: ghcr.io/datarocks-ag/postgres-provisioner:latest
     depends_on:
       postgres:
         condition: service_healthy
