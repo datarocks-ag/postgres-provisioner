@@ -429,7 +429,7 @@ func TestRunFullProvisioning(t *testing.T) {
 	// The full integration test covers the complete flow.
 
 	// We'll test just the role+database portion by calling methods directly
-	p := New(mockDB, db.ConnConfig{}, cfg)
+	p := New(mockDB, db.ConnConfig{}, cfg, true)
 
 	ctx := context.Background()
 	for _, role := range cfg.Roles {

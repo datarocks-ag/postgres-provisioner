@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,6 +17,11 @@ var version = "dev"
 
 func main() {
 	setupLogging()
+
+	migrationsDefault := envOrDefault("MIGRATIONS_ENABLED", "true") == "true"
+	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
+	flag.Parse()
+
 	slog.Info("Starting postgres-provisioner", "version", version)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -55,7 +61,7 @@ func main() {
 	}
 	defer adminDB.Close()
 
-	p := provisioner.New(adminDB, connCfg, cfg)
+	p := provisioner.New(adminDB, connCfg, cfg, *migrationsEnabled)
 	if err := p.Run(ctx); err != nil {
 		slog.Error("Provisioning failed", "error", err)
 		os.Exit(1)
