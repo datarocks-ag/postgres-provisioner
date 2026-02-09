@@ -1,6 +1,6 @@
 # postgres-provisioner
 
-A Go CLI tool that idempotently provisions PostgreSQL resources (roles, databases, extensions, schemas, grants) from a YAML config file. Designed as a Docker Compose init container that runs before your application starts.
+A Go CLI tool that idempotently provisions PostgreSQL resources (roles, databases, extensions, schemas, grants, migrations) from a YAML config file. Designed as a Docker Compose init container that runs before your application starts.
 
 ## Quick Start
 
@@ -47,6 +47,8 @@ databases:
       - role: "readonly_user"
         privileges: ["SELECT"]
         on_tables_in_schema: "app"
+    migrations:
+      directory: "./migrations/myapp"
 ```
 
 ## Environment Variables
@@ -60,6 +62,7 @@ databases:
 | `POSTGRES_DB` | no | `postgres` | Admin database |
 | `POSTGRES_SSLMODE` | no | `disable` | SSL mode |
 | `PGHELPER_CONFIG_PATH` | no | `./config.yaml` | Path to YAML config |
+| `MIGRATIONS_ENABLED` | no | `true` | Set to `false` to skip all migrations at runtime |
 | `LOG_LEVEL` | no | `info` | Log level (debug/info/warn/error) |
 
 ## Strategy
@@ -97,12 +100,42 @@ password: "${APP_DB_PASSWORD}"    # replaced with env var value at load time
 3. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
 4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
 5. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
+6. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
 
 ## Grant Types
 
 - `on_database: true` — grants privileges on the database itself (e.g., `CONNECT`)
 - `on_schema: "name"` — grants privileges on a schema (e.g., `ALL`, `USAGE`)
 - `on_tables_in_schema: "name"` — grants on all existing tables + sets `ALTER DEFAULT PRIVILEGES` for future tables
+
+## Migrations
+
+Flyway-style SQL migrations can be configured per database. Migration files are discovered from a directory and executed in order.
+
+```yaml
+databases:
+  - name: "myapp"
+    owner: "app_user"
+    migrations:
+      directory: "./migrations/myapp"   # supports ${VAR} expansion
+```
+
+**File naming:**
+
+- `V0001__create_users.sql` — **Versioned**: run once, immutable. Checksum is verified on subsequent runs; a mismatch causes an error.
+- `R0001__seed_data.sql` — **Repeatable**: re-run whenever the file content changes.
+
+Migrations are tracked in a `_schema_migrations` table (created automatically) with SHA-256 checksums. Versioned migrations run first (sorted by version), then repeatable migrations.
+
+**Disabling migrations at runtime:**
+
+Migrations can be disabled without changing the config file using the `--migrations=false` CLI flag or `MIGRATIONS_ENABLED=false` environment variable. The CLI flag takes precedence over the env var.
+
+## CLI Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--migrations` | `true` (or `MIGRATIONS_ENABLED` env var) | Enable/disable migrations |
 
 ## SSL Mode
 
@@ -151,6 +184,7 @@ services:
       APP_DB_PASSWORD: appsecret
     volumes:
       - ./config.yaml:/config.yaml:ro
+      - ./migrations:/migrations:ro
 
   app:
     image: your-app

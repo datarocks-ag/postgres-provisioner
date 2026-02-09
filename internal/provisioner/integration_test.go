@@ -4,7 +4,10 @@ package provisioner_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -130,7 +133,7 @@ databases:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 
 	// First run
 	if err := p.Run(ctx); err != nil {
@@ -155,7 +158,7 @@ databases:
 	assertExtensionExists(t, appDB, "pgcrypto")
 
 	// Second run should be idempotent (no errors)
-	p2 := provisioner.New(adminDB, connCfg, cfg)
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p2.Run(ctx); err != nil {
 		t.Fatalf("second (idempotent) provisioning run failed: %v", err)
 	}
@@ -179,7 +182,7 @@ roles:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 
 	if err := p.Run(ctx); err != nil {
 		t.Fatal(err)
@@ -201,7 +204,7 @@ roles:
 		t.Fatal(err)
 	}
 
-	p2 := provisioner.New(adminDB, connCfg, cfg2)
+	p2 := provisioner.New(adminDB, connCfg, cfg2, provisioner.DefaultOptions())
 	if err := p2.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +232,7 @@ func TestIntegrationEmptyConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := provisioner.New(adminDB, connCfg, cfg)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(context.Background()); err != nil {
 		t.Fatalf("empty config should succeed: %v", err)
 	}
@@ -274,7 +277,7 @@ databases:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -363,6 +366,13 @@ func assertSchemaExists(t *testing.T, db *sql.DB, name string) {
 	}
 }
 
+func writeMigrationFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatalf("writing migration file %q: %v", name, err)
+	}
+}
+
 func assertExtensionExists(t *testing.T, db *sql.DB, name string) {
 	t.Helper()
 	var exists bool
@@ -372,5 +382,299 @@ func assertExtensionExists(t *testing.T, db *sql.DB, name string) {
 	}
 	if !exists {
 		t.Errorf("extension %q does not exist", name)
+	}
+}
+
+func TestIntegrationMigrationsVersioned(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+	writeMigrationFile(t, migDir, "V0002__add_column.sql",
+		"ALTER TABLE items ADD COLUMN created_at timestamptz DEFAULT now();")
+
+	configYAML := fmt.Sprintf(`
+roles:
+  - name: "mig_user"
+    password: "migpass"
+    options:
+      login: true
+databases:
+  - name: "migdb"
+    owner: "mig_user"
+    migrations:
+      directory: %q
+`, migDir)
+
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Verify table exists with both columns
+	appDB, err := db.ConnectToDatabase(ctx, connCfg, "migdb")
+	if err != nil {
+		t.Fatalf("connect to migdb: %v", err)
+	}
+	defer appDB.Close()
+
+	_, err = appDB.ExecContext(ctx, "INSERT INTO items (name) VALUES ('test')")
+	if err != nil {
+		t.Fatalf("insert into items: %v", err)
+	}
+
+	var name string
+	var createdAt sql.NullTime
+	err = appDB.QueryRowContext(ctx, "SELECT name, created_at FROM items LIMIT 1").Scan(&name, &createdAt)
+	if err != nil {
+		t.Fatalf("select from items: %v", err)
+	}
+	if name != "test" {
+		t.Errorf("expected 'test', got %q", name)
+	}
+
+	// Verify tracking table
+	var count int
+	err = appDB.QueryRowContext(ctx, "SELECT count(*) FROM _schema_migrations WHERE type = 'versioned'").Scan(&count)
+	if err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 versioned migration records, got %d", count)
+	}
+}
+
+func TestIntegrationMigrationsIdempotent(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+
+	configYAML := fmt.Sprintf(`
+roles:
+  - name: "mig_user"
+    password: "migpass"
+    options:
+      login: true
+databases:
+  - name: "migdb2"
+    owner: "mig_user"
+    migrations:
+      directory: %q
+`, migDir)
+
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// First run
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Second run — should be idempotent
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p2.Run(ctx); err != nil {
+		t.Fatalf("second run (idempotent): %v", err)
+	}
+
+	// Verify still only 1 migration record
+	appDB, err := db.ConnectToDatabase(ctx, connCfg, "migdb2")
+	if err != nil {
+		t.Fatalf("connect to migdb2: %v", err)
+	}
+	defer appDB.Close()
+
+	var count int
+	err = appDB.QueryRowContext(ctx, "SELECT count(*) FROM _schema_migrations").Scan(&count)
+	if err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 migration record after idempotent run, got %d", count)
+	}
+}
+
+func TestIntegrationMigrationsChecksumMismatch(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+
+	configYAML := fmt.Sprintf(`
+roles:
+  - name: "mig_user"
+    password: "migpass"
+    options:
+      login: true
+databases:
+  - name: "migdb3"
+    owner: "mig_user"
+    migrations:
+      directory: %q
+`, migDir)
+
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// First run
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Modify the migration file (versioned = immutable, should error)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL, extra text);")
+
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	err = p2.Run(ctx)
+	if err == nil {
+		t.Fatal("expected error for versioned migration checksum mismatch")
+	}
+}
+
+func TestIntegrationMigrationsRepeatable(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+	writeMigrationFile(t, migDir, "R0001__seed_data.sql",
+		"INSERT INTO items (name) VALUES ('seed1') ON CONFLICT DO NOTHING;")
+
+	configYAML := fmt.Sprintf(`
+roles:
+  - name: "mig_user"
+    password: "migpass"
+    options:
+      login: true
+databases:
+  - name: "migdb4"
+    owner: "mig_user"
+    migrations:
+      directory: %q
+`, migDir)
+
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// First run
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Modify repeatable migration content
+	updatedContent := "INSERT INTO items (name) VALUES ('seed2') ON CONFLICT DO NOTHING;"
+	writeMigrationFile(t, migDir, "R0001__seed_data.sql", updatedContent)
+
+	// Second run — repeatable should re-execute without error
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p2.Run(ctx); err != nil {
+		t.Fatalf("second run with changed repeatable: %v", err)
+	}
+
+	// Verify updated checksum in tracking table
+	appDB, err := db.ConnectToDatabase(ctx, connCfg, "migdb4")
+	if err != nil {
+		t.Fatalf("connect to migdb4: %v", err)
+	}
+	defer appDB.Close()
+
+	var checksum string
+	err = appDB.QueryRowContext(ctx,
+		"SELECT checksum FROM _schema_migrations WHERE version = '0001' AND type = 'repeatable'").Scan(&checksum)
+	if err != nil {
+		t.Fatalf("query checksum: %v", err)
+	}
+
+	// checksum must match the SHA-256 of the updated content
+	expectedHash := sha256.Sum256([]byte(updatedContent))
+	expectedChecksum := hex.EncodeToString(expectedHash[:])
+	if checksum != expectedChecksum {
+		t.Errorf("expected checksum %q for updated content, got %q", expectedChecksum, checksum)
+	}
+}
+
+func TestIntegrationMigrationsDisabled(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+
+	configYAML := fmt.Sprintf(`
+roles:
+  - name: "mig_user"
+    password: "migpass"
+    options:
+      login: true
+databases:
+  - name: "migdb_disabled"
+    owner: "mig_user"
+    migrations:
+      directory: %q
+`, migDir)
+
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Run with migrations disabled
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.Options{MigrationsEnabled: false})
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("run with migrations disabled: %v", err)
+	}
+
+	// Verify database was created but _schema_migrations table does not exist
+	appDB, err := db.ConnectToDatabase(ctx, connCfg, "migdb_disabled")
+	if err != nil {
+		t.Fatalf("connect to migdb_disabled: %v", err)
+	}
+	defer appDB.Close()
+
+	var exists bool
+	err = appDB.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = '_schema_migrations')").Scan(&exists)
+	if err != nil {
+		t.Fatalf("check _schema_migrations: %v", err)
+	}
+	if exists {
+		t.Error("expected _schema_migrations table NOT to exist when migrations are disabled")
 	}
 }

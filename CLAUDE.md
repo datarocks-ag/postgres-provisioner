@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Go CLI tool that idempotently provisions PostgreSQL resources (roles, databases, extensions, schemas, grants) from a YAML config file. Designed as a Docker Compose init container.
+A Go CLI tool that idempotently provisions PostgreSQL resources (roles, databases, extensions, schemas, grants, migrations) from a YAML config file. Designed as a Docker Compose init container.
 
 ## Build & Run
 
@@ -26,6 +26,7 @@ make lint           # golangci-lint
 - `POSTGRES_DB` (default: `postgres`)
 - `POSTGRES_SSLMODE` (default: `disable`)
 - `PGHELPER_CONFIG_PATH` (default: `./config.yaml`)
+- `MIGRATIONS_ENABLED` (default: `true`) — set to `false` to skip all migrations at runtime
 - `LOG_LEVEL` (default: `info`)
 
 ## Architecture
@@ -43,7 +44,9 @@ internal/
     extensions.go                     # CREATE EXTENSION IF NOT EXISTS
     schemas.go                        # CREATE SCHEMA IF NOT EXISTS + owner
     grants.go                         # GRANT statements + ALTER DEFAULT PRIVILEGES
+    migrations.go                     # Flyway-style SQL migration discovery, tracking, execution
     provisioner_test.go               # Unit tests with go-sqlmock
+    migrations_test.go                # Unit tests for migration logic
     integration_test.go               # Integration tests with testcontainers-go (build tag: integration)
 ```
 
@@ -57,10 +60,12 @@ Go 1.25 module using:
 
 ## Key Design Decisions
 
-- **Order**: Roles → Databases → Extensions → Schemas → Grants
+- **Order**: Roles → Databases → Extensions → Schemas → Grants → Migrations
 - **Idempotency**: Check pg_roles/pg_database before CREATE; IF NOT EXISTS; GRANT is inherently idempotent
 - **Per-database connections**: Extensions/schemas/grants connect to each target database
 - **SQL injection prevention**: `quoteIdentifier()` and `quoteLiteral()` helpers
 - **Structured logging**: `log/slog` with JSON output
 - **Strategy**: `update` (default) or `create` (skip existing). Per-resource overrides global.
 - **Connection retry**: Exponential backoff (1s–30s, 15 retries, 5min timeout)
+- **Migrations**: Flyway-style SQL files (`V0001__desc.sql` versioned, `R0001__desc.sql` repeatable) with SHA-256 checksum tracking in `_schema_migrations` table. Versioned are immutable; repeatable re-run on change.
+- **Migrations toggle**: `--migrations` flag / `MIGRATIONS_ENABLED` env var (default `true`). CLI flag overrides env var.
