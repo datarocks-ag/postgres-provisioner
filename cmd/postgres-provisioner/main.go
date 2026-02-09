@@ -61,7 +61,9 @@ func main() {
 	}
 	defer adminDB.Close()
 
-	p := provisioner.New(adminDB, connCfg, cfg, *migrationsEnabled)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.Options{
+		MigrationsEnabled: *migrationsEnabled,
+	})
 	if err := p.Run(ctx); err != nil {
 		slog.Error("Provisioning failed", "error", err)
 		os.Exit(1)
