@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"postgres-provisioner/internal/config"
@@ -18,7 +19,15 @@ var version = "dev"
 func main() {
 	setupLogging()
 
-	migrationsDefault := envOrDefault("MIGRATIONS_ENABLED", "true") == "true"
+	migrationsDefault := true
+	if raw := os.Getenv("MIGRATIONS_ENABLED"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			slog.Error("Invalid MIGRATIONS_ENABLED value (expected true/false/1/0)", "value", raw)
+			os.Exit(1)
+		}
+		migrationsDefault = parsed
+	}
 	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
 	flag.Parse()
 

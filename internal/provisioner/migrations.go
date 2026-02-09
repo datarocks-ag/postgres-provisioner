@@ -64,8 +64,8 @@ func discoverMigrations(directory string) ([]MigrationFile, error) {
 	var versioned []MigrationFile
 	var repeatable []MigrationFile
 
-	seenVersioned := make(map[string]string) // version -> filename
-	seenRepeatable := make(map[string]string)
+	seenVersioned := make(map[int]string) // numeric version -> filename
+	seenRepeatable := make(map[int]string)
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -101,32 +101,41 @@ func discoverMigrations(directory string) ([]MigrationFile, error) {
 			Checksum:    checksum,
 		}
 
-		sortOrder, _ := strconv.Atoi(version)
+		sortOrder, err := strconv.Atoi(version)
+		if err != nil {
+			return nil, fmt.Errorf("migration file %q: version %q is not a valid integer: %w", entry.Name(), version, err)
+		}
 		mf.SortOrder = sortOrder
 
 		switch prefix {
 		case "V":
 			mf.Type = MigrationVersioned
-			if prev, ok := seenVersioned[version]; ok {
-				return nil, fmt.Errorf("duplicate versioned migration version %s: %q and %q", version, prev, entry.Name())
+			if prev, ok := seenVersioned[sortOrder]; ok {
+				return nil, fmt.Errorf("duplicate versioned migration version %d: %q and %q", sortOrder, prev, entry.Name())
 			}
-			seenVersioned[version] = entry.Name()
+			seenVersioned[sortOrder] = entry.Name()
 			versioned = append(versioned, mf)
 		case "R":
 			mf.Type = MigrationRepeatable
-			if prev, ok := seenRepeatable[version]; ok {
-				return nil, fmt.Errorf("duplicate repeatable migration version %s: %q and %q", version, prev, entry.Name())
+			if prev, ok := seenRepeatable[sortOrder]; ok {
+				return nil, fmt.Errorf("duplicate repeatable migration version %d: %q and %q", sortOrder, prev, entry.Name())
 			}
-			seenRepeatable[version] = entry.Name()
+			seenRepeatable[sortOrder] = entry.Name()
 			repeatable = append(repeatable, mf)
 		}
 	}
 
 	sort.Slice(versioned, func(i, j int) bool {
-		return versioned[i].SortOrder < versioned[j].SortOrder
+		if versioned[i].SortOrder != versioned[j].SortOrder {
+			return versioned[i].SortOrder < versioned[j].SortOrder
+		}
+		return versioned[i].Filename < versioned[j].Filename
 	})
 	sort.Slice(repeatable, func(i, j int) bool {
-		return repeatable[i].SortOrder < repeatable[j].SortOrder
+		if repeatable[i].SortOrder != repeatable[j].SortOrder {
+			return repeatable[i].SortOrder < repeatable[j].SortOrder
+		}
+		return repeatable[i].Filename < repeatable[j].Filename
 	})
 
 	// All versioned first, then all repeatable

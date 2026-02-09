@@ -4,7 +4,9 @@ package provisioner_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -364,6 +366,13 @@ func assertSchemaExists(t *testing.T, db *sql.DB, name string) {
 	}
 }
 
+func writeMigrationFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatalf("writing migration file %q: %v", name, err)
+	}
+}
+
 func assertExtensionExists(t *testing.T, db *sql.DB, name string) {
 	t.Helper()
 	var exists bool
@@ -381,10 +390,10 @@ func TestIntegrationMigrationsVersioned(t *testing.T) {
 	defer cleanup()
 
 	migDir := t.TempDir()
-	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
-		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);"), 0644)
-	os.WriteFile(filepath.Join(migDir, "V0002__add_column.sql"),
-		[]byte("ALTER TABLE items ADD COLUMN created_at timestamptz DEFAULT now();"), 0644)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+	writeMigrationFile(t, migDir, "V0002__add_column.sql",
+		"ALTER TABLE items ADD COLUMN created_at timestamptz DEFAULT now();")
 
 	configYAML := fmt.Sprintf(`
 roles:
@@ -449,8 +458,8 @@ func TestIntegrationMigrationsIdempotent(t *testing.T) {
 	defer cleanup()
 
 	migDir := t.TempDir()
-	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
-		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);"), 0644)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
 
 	configYAML := fmt.Sprintf(`
 roles:
@@ -507,8 +516,8 @@ func TestIntegrationMigrationsChecksumMismatch(t *testing.T) {
 	defer cleanup()
 
 	migDir := t.TempDir()
-	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
-		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);"), 0644)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
 
 	configYAML := fmt.Sprintf(`
 roles:
@@ -538,8 +547,8 @@ databases:
 	}
 
 	// Modify the migration file (versioned = immutable, should error)
-	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
-		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL, extra text);"), 0644)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL, extra text);")
 
 	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	err = p2.Run(ctx)
@@ -553,10 +562,10 @@ func TestIntegrationMigrationsRepeatable(t *testing.T) {
 	defer cleanup()
 
 	migDir := t.TempDir()
-	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
-		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);"), 0644)
-	os.WriteFile(filepath.Join(migDir, "R0001__seed_data.sql"),
-		[]byte("INSERT INTO items (name) VALUES ('seed1') ON CONFLICT DO NOTHING;"), 0644)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
+	writeMigrationFile(t, migDir, "R0001__seed_data.sql",
+		"INSERT INTO items (name) VALUES ('seed1') ON CONFLICT DO NOTHING;")
 
 	configYAML := fmt.Sprintf(`
 roles:
@@ -586,8 +595,8 @@ databases:
 	}
 
 	// Modify repeatable migration content
-	os.WriteFile(filepath.Join(migDir, "R0001__seed_data.sql"),
-		[]byte("INSERT INTO items (name) VALUES ('seed2') ON CONFLICT DO NOTHING;"), 0644)
+	updatedContent := "INSERT INTO items (name) VALUES ('seed2') ON CONFLICT DO NOTHING;"
+	writeMigrationFile(t, migDir, "R0001__seed_data.sql", updatedContent)
 
 	// Second run — repeatable should re-execute without error
 	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
@@ -609,9 +618,11 @@ databases:
 		t.Fatalf("query checksum: %v", err)
 	}
 
-	// checksum should match the new content
-	if checksum == "" {
-		t.Error("expected non-empty checksum")
+	// checksum must match the SHA-256 of the updated content
+	expectedHash := sha256.Sum256([]byte(updatedContent))
+	expectedChecksum := hex.EncodeToString(expectedHash[:])
+	if checksum != expectedChecksum {
+		t.Errorf("expected checksum %q for updated content, got %q", expectedChecksum, checksum)
 	}
 }
 
@@ -620,8 +631,8 @@ func TestIntegrationMigrationsDisabled(t *testing.T) {
 	defer cleanup()
 
 	migDir := t.TempDir()
-	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
-		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);"), 0644)
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL);")
 
 	configYAML := fmt.Sprintf(`
 roles:
