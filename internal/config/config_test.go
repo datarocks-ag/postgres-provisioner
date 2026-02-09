@@ -473,6 +473,91 @@ func TestEffectiveStrategy(t *testing.T) {
 	}
 }
 
+func TestValidationMigrationsValid(t *testing.T) {
+	yaml := `
+roles:
+  - name: "app_user"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "app_user"
+    migrations:
+      directory: "./migrations/db1"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Migrations == nil {
+		t.Fatal("expected migrations to be non-nil")
+	}
+	if cfg.Databases[0].Migrations.Directory != "./migrations/db1" {
+		t.Errorf("expected directory './migrations/db1', got %q", cfg.Databases[0].Migrations.Directory)
+	}
+}
+
+func TestValidationMigrationsEmptyDirectory(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+    migrations:
+      directory: ""
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for empty migrations directory")
+	}
+}
+
+func TestValidationMigrationsNullByteInDirectory(t *testing.T) {
+	yaml := "databases:\n  - name: \"db1\"\n    migrations:\n      directory: \"./mig\\x00rations\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in migrations directory")
+	}
+}
+
+func TestMigrationsEnvVarExpansion(t *testing.T) {
+	t.Setenv("TEST_MIG_DIR", "/opt/migrations")
+
+	yaml := `
+roles:
+  - name: "app_user"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "app_user"
+    migrations:
+      directory: "${TEST_MIG_DIR}/db1"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Migrations.Directory != "/opt/migrations/db1" {
+		t.Errorf("expected '/opt/migrations/db1', got %q", cfg.Databases[0].Migrations.Directory)
+	}
+}
+
+func TestMigrationsNilWhenAbsent(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Migrations != nil {
+		t.Error("expected migrations to be nil when not specified")
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()

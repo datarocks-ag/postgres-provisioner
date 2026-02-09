@@ -91,14 +91,20 @@ type Schema struct {
 	Owner string `yaml:"owner"`
 }
 
+// Migrations configures SQL migration file discovery for a database.
+type Migrations struct {
+	Directory string `yaml:"directory"`
+}
+
 // Database defines a PostgreSQL database to provision.
 type Database struct {
-	Name       string   `yaml:"name"`
-	Owner      string   `yaml:"owner"`
-	Extensions []string `yaml:"extensions"`
-	Schemas    []Schema `yaml:"schemas"`
-	Grants     []Grant  `yaml:"grants"`
-	Strategy   string   `yaml:"strategy"`
+	Name       string      `yaml:"name"`
+	Owner      string      `yaml:"owner"`
+	Extensions []string    `yaml:"extensions"`
+	Schemas    []Schema    `yaml:"schemas"`
+	Grants     []Grant     `yaml:"grants"`
+	Migrations *Migrations `yaml:"migrations"`
+	Strategy   string      `yaml:"strategy"`
 }
 
 // Config is the top-level YAML configuration.
@@ -139,6 +145,9 @@ func expandConfig(cfg *Config) {
 		for j := range cfg.Databases[i].Schemas {
 			cfg.Databases[i].Schemas[j].Name = expandEnvVars(cfg.Databases[i].Schemas[j].Name)
 			cfg.Databases[i].Schemas[j].Owner = expandEnvVars(cfg.Databases[i].Schemas[j].Owner)
+		}
+		if cfg.Databases[i].Migrations != nil {
+			cfg.Databases[i].Migrations.Directory = expandEnvVars(cfg.Databases[i].Migrations.Directory)
 		}
 		for j := range cfg.Databases[i].Grants {
 			cfg.Databases[i].Grants[j].Role = expandEnvVars(cfg.Databases[i].Grants[j].Role)
@@ -305,6 +314,15 @@ func validate(cfg *Config) error {
 			}
 			if targets != 1 {
 				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_schema, on_database, or on_tables_in_schema is required", i, j)
+			}
+		}
+
+		if d.Migrations != nil {
+			if d.Migrations.Directory == "" {
+				return fmt.Errorf("databases[%d].migrations: directory is required", i)
+			}
+			if containsNullByte(d.Migrations.Directory) {
+				return fmt.Errorf("databases[%d].migrations.directory: contains null byte", i)
 			}
 		}
 	}
