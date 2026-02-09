@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -499,8 +500,12 @@ databases:
 
 func TestValidationMigrationsEmptyDirectory(t *testing.T) {
 	yaml := `
+roles:
+  - name: "app_user"
+    password: "pass"
 databases:
   - name: "db1"
+    owner: "app_user"
     migrations:
       directory: ""
 `
@@ -509,14 +514,20 @@ databases:
 	if err == nil {
 		t.Fatal("expected validation error for empty migrations directory")
 	}
+	if !strings.Contains(err.Error(), "databases[0].migrations") {
+		t.Errorf("expected error to mention 'databases[0].migrations', got: %v", err)
+	}
 }
 
 func TestValidationMigrationsNullByteInDirectory(t *testing.T) {
-	yaml := "databases:\n  - name: \"db1\"\n    migrations:\n      directory: \"./mig\\x00rations\"\n"
+	yaml := "roles:\n  - name: \"app_user\"\n    password: \"pass\"\ndatabases:\n  - name: \"db1\"\n    owner: \"app_user\"\n    migrations:\n      directory: \"./mig\\x00rations\"\n"
 	path := writeTempConfig(t, yaml)
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("expected validation error for null byte in migrations directory")
+	}
+	if !strings.Contains(err.Error(), "databases[0].migrations.directory") {
+		t.Errorf("expected error to mention 'databases[0].migrations.directory', got: %v", err)
 	}
 }
 
