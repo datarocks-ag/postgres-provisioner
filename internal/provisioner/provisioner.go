@@ -11,21 +11,33 @@ import (
 	"postgres-provisioner/internal/db"
 )
 
+// Options configures optional Provisioner behavior.
+type Options struct {
+	MigrationsEnabled bool
+}
+
+// DefaultOptions returns Options with sensible defaults.
+func DefaultOptions() Options {
+	return Options{
+		MigrationsEnabled: true,
+	}
+}
+
 // Provisioner orchestrates idempotent PostgreSQL resource provisioning.
 type Provisioner struct {
-	adminDB           *sql.DB
-	connCfg           db.ConnConfig
-	cfg               *config.Config
-	migrationsEnabled bool
+	adminDB *sql.DB
+	connCfg db.ConnConfig
+	cfg     *config.Config
+	opts    Options
 }
 
 // New creates a new Provisioner.
-func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, migrationsEnabled bool) *Provisioner {
+func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Options) *Provisioner {
 	return &Provisioner{
-		adminDB:           adminDB,
-		connCfg:           connCfg,
-		cfg:               cfg,
-		migrationsEnabled: migrationsEnabled,
+		adminDB: adminDB,
+		connCfg: connCfg,
+		cfg:     cfg,
+		opts:    opts,
 	}
 }
 
@@ -100,7 +112,7 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 
 	// 6. Migrations
 	if database.Migrations != nil && database.Migrations.Directory != "" {
-		if !p.migrationsEnabled {
+		if !p.opts.MigrationsEnabled {
 			slog.Info("Migrations disabled, skipping", "database", database.Name)
 			return nil
 		}

@@ -131,7 +131,7 @@ databases:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 
 	// First run
 	if err := p.Run(ctx); err != nil {
@@ -156,7 +156,7 @@ databases:
 	assertExtensionExists(t, appDB, "pgcrypto")
 
 	// Second run should be idempotent (no errors)
-	p2 := provisioner.New(adminDB, connCfg, cfg, true)
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p2.Run(ctx); err != nil {
 		t.Fatalf("second (idempotent) provisioning run failed: %v", err)
 	}
@@ -180,7 +180,7 @@ roles:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 
 	if err := p.Run(ctx); err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ roles:
 		t.Fatal(err)
 	}
 
-	p2 := provisioner.New(adminDB, connCfg, cfg2, true)
+	p2 := provisioner.New(adminDB, connCfg, cfg2, provisioner.DefaultOptions())
 	if err := p2.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestIntegrationEmptyConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(context.Background()); err != nil {
 		t.Fatalf("empty config should succeed: %v", err)
 	}
@@ -275,7 +275,7 @@ databases:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ databases:
 	}
 
 	ctx := context.Background()
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(ctx); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -474,13 +474,13 @@ databases:
 	ctx := context.Background()
 
 	// First run
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(ctx); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 
 	// Second run — should be idempotent
-	p2 := provisioner.New(adminDB, connCfg, cfg, true)
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p2.Run(ctx); err != nil {
 		t.Fatalf("second run (idempotent): %v", err)
 	}
@@ -532,7 +532,7 @@ databases:
 	ctx := context.Background()
 
 	// First run
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(ctx); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -541,7 +541,7 @@ databases:
 	os.WriteFile(filepath.Join(migDir, "V0001__create_items.sql"),
 		[]byte("CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL, extra text);"), 0644)
 
-	p2 := provisioner.New(adminDB, connCfg, cfg, true)
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	err = p2.Run(ctx)
 	if err == nil {
 		t.Fatal("expected error for versioned migration checksum mismatch")
@@ -580,7 +580,7 @@ databases:
 	ctx := context.Background()
 
 	// First run
-	p := provisioner.New(adminDB, connCfg, cfg, true)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p.Run(ctx); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -590,7 +590,7 @@ databases:
 		[]byte("INSERT INTO items (name) VALUES ('seed2') ON CONFLICT DO NOTHING;"), 0644)
 
 	// Second run — repeatable should re-execute without error
-	p2 := provisioner.New(adminDB, connCfg, cfg, true)
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
 	if err := p2.Run(ctx); err != nil {
 		t.Fatalf("second run with changed repeatable: %v", err)
 	}
@@ -645,7 +645,7 @@ databases:
 	ctx := context.Background()
 
 	// Run with migrations disabled
-	p := provisioner.New(adminDB, connCfg, cfg, false)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.Options{MigrationsEnabled: false})
 	if err := p.Run(ctx); err != nil {
 		t.Fatalf("run with migrations disabled: %v", err)
 	}
