@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"postgres-provisioner/internal/config"
@@ -16,6 +18,19 @@ var version = "dev"
 
 func main() {
 	setupLogging()
+
+	migrationsDefault := true
+	if raw := os.Getenv("MIGRATIONS_ENABLED"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			slog.Error("Invalid MIGRATIONS_ENABLED value (expected true/false/1/0)", "value", raw)
+			os.Exit(1)
+		}
+		migrationsDefault = parsed
+	}
+	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
+	flag.Parse()
+
 	slog.Info("Starting postgres-provisioner", "version", version)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -55,7 +70,9 @@ func main() {
 	}
 	defer adminDB.Close()
 
-	p := provisioner.New(adminDB, connCfg, cfg)
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.Options{
+		MigrationsEnabled: *migrationsEnabled,
+	})
 	if err := p.Run(ctx); err != nil {
 		slog.Error("Provisioning failed", "error", err)
 		os.Exit(1)

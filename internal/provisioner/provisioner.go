@@ -11,19 +11,33 @@ import (
 	"postgres-provisioner/internal/db"
 )
 
+// Options configures optional Provisioner behavior.
+type Options struct {
+	MigrationsEnabled bool
+}
+
+// DefaultOptions returns Options with sensible defaults.
+func DefaultOptions() Options {
+	return Options{
+		MigrationsEnabled: true,
+	}
+}
+
 // Provisioner orchestrates idempotent PostgreSQL resource provisioning.
 type Provisioner struct {
 	adminDB *sql.DB
 	connCfg db.ConnConfig
 	cfg     *config.Config
+	opts    Options
 }
 
 // New creates a new Provisioner.
-func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config) *Provisioner {
+func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Options) *Provisioner {
 	return &Provisioner{
 		adminDB: adminDB,
 		connCfg: connCfg,
 		cfg:     cfg,
+		opts:    opts,
 	}
 }
 
@@ -93,6 +107,17 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 	for _, grant := range database.Grants {
 		if err := p.applyGrant(ctx, dbConn, database, grant); err != nil {
 			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
+		}
+	}
+
+	// 6. Migrations
+	if database.Migrations != nil && database.Migrations.Directory != "" {
+		if !p.opts.MigrationsEnabled {
+			slog.Info("Migrations disabled, skipping", "database", database.Name)
+			return nil
+		}
+		if err := p.runMigrations(ctx, dbConn, database.Name, *database.Migrations); err != nil {
+			return fmt.Errorf("running migrations for database %q: %w", database.Name, err)
 		}
 	}
 

@@ -48,3 +48,10 @@ databases:
       - role: "readonly_user"
         privileges: ["SELECT"]
         on_tables_in_schema: "app"    # GRANT SELECT ON ALL TABLES + ALTER DEFAULT PRIVILEGES
+
+    # migrations:                       # optional: Flyway-style SQL migrations
+    #   directory: "./migrations/myapp" # supports ${VAR} expansion
+    #                                   # File naming:
+    #                                   #   V0001__create_users.sql  → versioned (run once, immutable)
+    #                                   #   R0001__seed_data.sql     → repeatable (re-run on change)
+    #                                   # Tracked via _schema_migrations table with SHA-256 checksums
