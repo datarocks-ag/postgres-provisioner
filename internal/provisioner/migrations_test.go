@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"postgres-provisioner/internal/config"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -265,6 +268,477 @@ func TestLoadAppliedMigrations(t *testing.T) {
 	if rec.Checksum != "def456" {
 		t.Errorf("checksum: got %q, want def456", rec.Checksum)
 	}
+}
+
+func TestDiscoverMigrationsDuplicateRepeatable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "R0001__first.sql", "SELECT 1;")
+	writeFile(t, dir, "R0001__second.sql", "SELECT 2;")
+
+	_, err := discoverMigrations(dir)
+	if err == nil {
+		t.Fatal("expected error for duplicate repeatable versions")
+	}
+}
+
+func TestDiscoverMigrationsSkipsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "V0001__create.sql", "CREATE TABLE t (id int);")
+	if err := os.Mkdir(filepath.Join(dir, "V0002__subdir.sql"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := discoverMigrations(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+}
+
+func TestRunMigrationsNoFiles(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunMigrationsDiscoverError(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: "/nonexistent"})
+	if err == nil {
+		t.Fatal("expected error for non-existent directory")
+	}
+}
+
+func TestRunMigrationsAllApplied(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	content := "CREATE TABLE users (id int);"
+	writeFile(t, dir, "V0001__create_users.sql", content)
+
+	hash := sha256.Sum256([]byte(content))
+	checksum := hex.EncodeToString(hash[:])
+
+	// ensureMigrationTable
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// loadAppliedMigrations returns the same migration with matching checksum
+	rows := sqlmock.NewRows([]string{"version", "type", "checksum"}).
+		AddRow("0001", "versioned", checksum)
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(rows)
+
+	// No execution expected — already applied with same checksum
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunMigrationsVersionedChecksumMismatch(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "V0001__create_users.sql", "CREATE TABLE users (id int);")
+
+	// ensureMigrationTable
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// loadAppliedMigrations returns the migration with a DIFFERENT checksum
+	rows := sqlmock.NewRows([]string{"version", "type", "checksum"}).
+		AddRow("0001", "versioned", "old_checksum_that_doesnt_match")
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(rows)
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir})
+	if err == nil {
+		t.Fatal("expected error for versioned checksum mismatch")
+	}
+	if !contains(err.Error(), "checksum mismatch") {
+		t.Errorf("expected 'checksum mismatch' in error, got: %v", err)
+	}
+}
+
+func TestRunMigrationsRepeatableChecksumChange(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	content := "INSERT INTO users VALUES (1), (2);"
+	writeFile(t, dir, "R0001__seed.sql", content)
+
+	hash := sha256.Sum256([]byte(content))
+	newChecksum := hex.EncodeToString(hash[:])
+
+	// ensureMigrationTable
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// loadAppliedMigrations returns old checksum
+	rows := sqlmock.NewRows([]string{"version", "type", "checksum"}).
+		AddRow("0001", "repeatable", "old_checksum")
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(rows)
+
+	// executeMigration with isUpdate=true
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO users").WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE _schema_migrations").
+		WithArgs(newChecksum, "R0001__seed.sql", "seed", "0001", "repeatable").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunMigrationsNewMigration(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	content := "CREATE TABLE orders (id int);"
+	writeFile(t, dir, "V0001__create_orders.sql", content)
+
+	hash := sha256.Sum256([]byte(content))
+	checksum := hex.EncodeToString(hash[:])
+
+	// ensureMigrationTable
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// loadAppliedMigrations returns empty
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"version", "type", "checksum"}))
+
+	// executeMigration with isUpdate=false
+	mock.ExpectBegin()
+	mock.ExpectExec("CREATE TABLE orders").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO _schema_migrations").
+		WithArgs("0001", "versioned", "create_orders", "V0001__create_orders.sql", checksum).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunMigrationsMultiple(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	content1 := "CREATE TABLE users (id int);"
+	content2 := "CREATE TABLE orders (id int);"
+	writeFile(t, dir, "V0001__create_users.sql", content1)
+	writeFile(t, dir, "V0002__create_orders.sql", content2)
+
+	hash1 := sha256.Sum256([]byte(content1))
+	checksum1 := hex.EncodeToString(hash1[:])
+	hash2 := sha256.Sum256([]byte(content2))
+	checksum2 := hex.EncodeToString(hash2[:])
+
+	// ensureMigrationTable
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// V0001 already applied
+	rows := sqlmock.NewRows([]string{"version", "type", "checksum"}).
+		AddRow("0001", "versioned", checksum1)
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(rows)
+
+	// Only V0002 should be executed
+	mock.ExpectBegin()
+	mock.ExpectExec("CREATE TABLE orders").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO _schema_migrations").
+		WithArgs("0002", "versioned", "create_orders", "V0002__create_orders.sql", checksum2).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunMigrationsEnsureTableError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "V0001__create.sql", "CREATE TABLE t (id int);")
+
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnError(fmt.Errorf("permission denied"))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir})
+	if err == nil {
+		t.Fatal("expected error for failed migration table creation")
+	}
+}
+
+func TestRunMigrationsLoadAppliedError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "V0001__create.sql", "CREATE TABLE t (id int);")
+
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnError(fmt.Errorf("query failed"))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir})
+	if err == nil {
+		t.Fatal("expected error for failed applied migrations query")
+	}
+}
+
+func TestRunMigrationsExecutionError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "V0001__bad.sql", "INVALID SQL;")
+
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"version", "type", "checksum"}))
+
+	mock.ExpectBegin()
+	mock.ExpectExec("INVALID SQL").WillReturnError(fmt.Errorf("syntax error"))
+	mock.ExpectRollback()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir})
+	if err == nil {
+		t.Fatal("expected error for failed migration execution")
+	}
+}
+
+func TestExecuteMigrationBeginError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectBegin().WillReturnError(fmt.Errorf("cannot begin"))
+
+	mf := MigrationFile{
+		Type:     MigrationVersioned,
+		Version:  "0001",
+		Filename: "V0001__test.sql",
+		Content:  "SELECT 1;",
+		Checksum: "abc",
+	}
+
+	err = executeMigration(context.Background(), mockDB, mf, false)
+	if err == nil {
+		t.Fatal("expected error for failed begin")
+	}
+}
+
+func TestExecuteMigrationTrackingError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mf := MigrationFile{
+		Type:        MigrationVersioned,
+		Version:     "0001",
+		Description: "test",
+		Filename:    "V0001__test.sql",
+		Content:     "SELECT 1;",
+		Checksum:    "abc",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT 1").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO _schema_migrations").
+		WithArgs("0001", "versioned", "test", "V0001__test.sql", "abc").
+		WillReturnError(fmt.Errorf("unique constraint violation"))
+	mock.ExpectRollback()
+
+	err = executeMigration(context.Background(), mockDB, mf, false)
+	if err == nil {
+		t.Fatal("expected error for failed tracking insert")
+	}
+}
+
+func TestRunMigrationsRepeatableReExecuteError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "R0001__seed.sql", "INSERT INTO users VALUES (1);")
+
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	rows := sqlmock.NewRows([]string{"version", "type", "checksum"}).
+		AddRow("0001", "repeatable", "old_checksum")
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(rows)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO users").WillReturnError(fmt.Errorf("table does not exist"))
+	mock.ExpectRollback()
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "testdb", config.Migrations{Directory: dir})
+	if err == nil {
+		t.Fatal("expected error for failed repeatable re-execution")
+	}
+}
+
+func TestDiscoverMigrationsUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "V0001__unreadable.sql")
+	if err := os.WriteFile(filePath, []byte("SELECT 1;"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Remove read permissions
+	if err := os.Chmod(filePath, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filePath, 0644) })
+
+	_, err := discoverMigrations(dir)
+	if err == nil {
+		t.Fatal("expected error for unreadable migration file")
+	}
+}
+
+func TestLoadAppliedMigrationsScanError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// Return rows with wrong number of columns to trigger scan error
+	rows := sqlmock.NewRows([]string{"version", "type", "checksum"}).
+		AddRow("0001", "versioned", nil) // nil checksum may cause scan issue depending on driver
+	// Actually, a better way is to use RowError
+	rows.RowError(0, fmt.Errorf("row error"))
+
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(rows)
+
+	_, err = loadAppliedMigrations(context.Background(), mockDB)
+	if err == nil {
+		t.Fatal("expected error for rows error")
+	}
+}
+
+func TestLoadAppliedMigrationsQueryError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnError(fmt.Errorf("query failed"))
+
+	_, err = loadAppliedMigrations(context.Background(), mockDB)
+	if err == nil {
+		t.Fatal("expected error for failed query")
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
+}
+
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFile(t *testing.T, dir, name, content string) {

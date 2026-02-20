@@ -10,3 +10,4 @@
 # Test
 *.test
 coverage.out
+cover.out
