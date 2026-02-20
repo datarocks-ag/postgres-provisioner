@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -28,8 +29,14 @@ func main() {
 		}
 		migrationsDefault = parsed
 	}
+	showVersion := flag.Bool("version", false, "print version and exit")
 	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	slog.Info("Starting postgres-provisioner", "version", version)
 
