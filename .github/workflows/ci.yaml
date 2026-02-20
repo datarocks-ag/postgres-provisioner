@@ -1,56 +1,128 @@
-name: CI
+name: CI postgres-provisioner
 
 on:
   push:
-    branches: [develop]
-  pull_request:
-    branches: [develop]
+    branches:
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+      - 'release/**'
+      - 'dependabot/**'
+
+env:
+  GO_VERSION: "1.25"
 
 jobs:
   lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: ${{ env.GO_VERSION }}
+
       - name: Run golangci-lint
         run: go tool golangci-lint run
 
   test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
-      - name: Run unit tests
-        run: go test -race ./...
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: github.event_name != 'pull_request'
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
 
   test-integration:
+    name: Integration Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Download dependencies
+        run: go mod download
+
       - name: Run integration tests
-        run: go test -race -tags=integration -v ./...
+        run: go test -v -race -tags=integration ./...
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          output: 'trivy-results.txt'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+
+      - name: Publish Trivy results to summary
+        run: |
+          if [[ -s trivy-results.txt ]]; then
+            {
+              echo "### Security Scan Results"
+              echo "<details><summary>Click to expand</summary>"
+              echo ""
+              echo '```'
+              cat trivy-results.txt
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Security Scan Results" >> $GITHUB_STEP_SUMMARY
+            echo "No CRITICAL or HIGH vulnerabilities found." >> $GITHUB_STEP_SUMMARY
+          fi
 
   build:
+    name: Build
     runs-on: ubuntu-latest
+    needs: [lint, test, test-integration, security]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: ${{ env.GO_VERSION }}
+
       - name: Build binary
-        run: go build -o postgres-provisioner ./cmd/postgres-provisioner
+        run: CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o postgres-provisioner ./cmd/postgres-provisioner
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-provisioner
+          path: postgres-provisioner
