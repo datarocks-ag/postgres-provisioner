@@ -569,6 +569,300 @@ databases:
 	}
 }
 
+func TestLoadNonexistentFile(t *testing.T) {
+	_, err := Load("/nonexistent/path/config.yaml")
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+	if !strings.Contains(err.Error(), "reading config file") {
+		t.Errorf("expected 'reading config file' in error, got: %v", err)
+	}
+}
+
+func TestLoadInvalidYAML(t *testing.T) {
+	yaml := `
+roles:
+  - name: [invalid yaml
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid YAML")
+	}
+	if !strings.Contains(err.Error(), "parsing config YAML") {
+		t.Errorf("expected 'parsing config YAML' in error, got: %v", err)
+	}
+}
+
+func TestValidationMissingDatabaseName(t *testing.T) {
+	yaml := `
+databases:
+  - owner: "someowner"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for missing database name")
+	}
+}
+
+func TestValidationGrantMissingRole(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+    grants:
+      - privileges: ["SELECT"]
+        on_database: true
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for missing grant role")
+	}
+}
+
+func TestValidationGrantMissingPrivileges(t *testing.T) {
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+databases:
+  - name: "db1"
+    grants:
+      - role: "user1"
+        on_database: true
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for missing grant privileges")
+	}
+}
+
+func TestValidationNullByteInPassword(t *testing.T) {
+	yaml := "roles:\n  - name: \"user1\"\n    password: \"pass\\x00word\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in password")
+	}
+}
+
+func TestValidationNullByteInDatabaseName(t *testing.T) {
+	yaml := "databases:\n  - name: \"db\\x00evil\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in database name")
+	}
+}
+
+func TestValidationNullByteInDatabaseOwner(t *testing.T) {
+	yaml := "roles:\n  - name: \"user1\"\n    password: \"pass\"\ndatabases:\n  - name: \"db1\"\n    owner: \"user\\x001\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in database owner")
+	}
+}
+
+func TestValidationNullByteInExtension(t *testing.T) {
+	yaml := "databases:\n  - name: \"db1\"\n    extensions:\n      - \"uuid\\x00ossp\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in extension")
+	}
+}
+
+func TestValidationNullByteInSchemaName(t *testing.T) {
+	yaml := "databases:\n  - name: \"db1\"\n    schemas:\n      - name: \"app\\x00evil\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in schema name")
+	}
+}
+
+func TestValidationNullByteInGrantRole(t *testing.T) {
+	yaml := "roles:\n  - name: \"user1\"\n    password: \"pass\"\ndatabases:\n  - name: \"db1\"\n    grants:\n      - role: \"user\\x001\"\n        privileges: [\"SELECT\"]\n        on_database: true\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in grant role")
+	}
+}
+
+func TestValidationNullByteInSchemaOwner(t *testing.T) {
+	yaml := "databases:\n  - name: \"db1\"\n    schemas:\n      - name: \"app\"\n        owner: \"user\\x001\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in schema owner")
+	}
+}
+
+func TestContainsNullByte(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"hello", false},
+		{"", false},
+		{"hel\x00lo", true},
+		{"\x00", true},
+	}
+	for _, tt := range tests {
+		got := containsNullByte(tt.input)
+		if got != tt.want {
+			t.Errorf("containsNullByte(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestExpandEnvVarsMultiple(t *testing.T) {
+	t.Setenv("VAR_A", "hello")
+	t.Setenv("VAR_B", "world")
+
+	result := expandEnvVars("${VAR_A}_${VAR_B}")
+	if result != "hello_world" {
+		t.Errorf("expected 'hello_world', got %q", result)
+	}
+}
+
+func TestExpandEnvVarsNoVars(t *testing.T) {
+	result := expandEnvVars("no vars here")
+	if result != "no vars here" {
+		t.Errorf("expected 'no vars here', got %q", result)
+	}
+}
+
+func TestValidationGrantThreeTargets(t *testing.T) {
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+databases:
+  - name: "db1"
+    grants:
+      - role: "user1"
+        privileges: ["ALL"]
+        on_schema: "public"
+        on_database: true
+        on_tables_in_schema: "public"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for grant with three targets")
+	}
+}
+
+func TestEnvVarExpansionInGrants(t *testing.T) {
+	t.Setenv("TEST_ROLE", "myuser")
+	t.Setenv("TEST_SCHEMA", "myschema")
+
+	yaml := `
+roles:
+  - name: "myuser"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "myuser"
+    grants:
+      - role: "${TEST_ROLE}"
+        privileges: ["ALL"]
+        on_schema: "${TEST_SCHEMA}"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Grants[0].Role != "myuser" {
+		t.Errorf("expected role 'myuser', got %q", cfg.Databases[0].Grants[0].Role)
+	}
+	if cfg.Databases[0].Grants[0].OnSchema != "myschema" {
+		t.Errorf("expected on_schema 'myschema', got %q", cfg.Databases[0].Grants[0].OnSchema)
+	}
+}
+
+func TestEnvVarExpansionInExtensions(t *testing.T) {
+	t.Setenv("TEST_EXT", "pgcrypto")
+
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "user1"
+    extensions:
+      - "${TEST_EXT}"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Extensions[0] != "pgcrypto" {
+		t.Errorf("expected extension 'pgcrypto', got %q", cfg.Databases[0].Extensions[0])
+	}
+}
+
+func TestEnvVarExpansionInSchemas(t *testing.T) {
+	t.Setenv("TEST_SCHEMA_NAME", "myschema")
+	t.Setenv("TEST_SCHEMA_OWNER", "myuser")
+
+	yaml := `
+roles:
+  - name: "myuser"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "myuser"
+    schemas:
+      - name: "${TEST_SCHEMA_NAME}"
+        owner: "${TEST_SCHEMA_OWNER}"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Schemas[0].Name != "myschema" {
+		t.Errorf("expected schema name 'myschema', got %q", cfg.Databases[0].Schemas[0].Name)
+	}
+	if cfg.Databases[0].Schemas[0].Owner != "myuser" {
+		t.Errorf("expected schema owner 'myuser', got %q", cfg.Databases[0].Schemas[0].Owner)
+	}
+}
+
+func TestEnvVarExpansionInPrivileges(t *testing.T) {
+	t.Setenv("TEST_PRIV", "SELECT")
+
+	yaml := `
+roles:
+  - name: "user1"
+    password: "pass"
+databases:
+  - name: "db1"
+    owner: "user1"
+    grants:
+      - role: "user1"
+        privileges: ["${TEST_PRIV}"]
+        on_database: true
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Grants[0].Privileges[0] != "SELECT" {
+		t.Errorf("expected privilege 'SELECT', got %q", cfg.Databases[0].Grants[0].Privileges[0])
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
