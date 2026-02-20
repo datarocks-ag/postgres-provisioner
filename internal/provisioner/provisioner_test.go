@@ -2,6 +2,10 @@ package provisioner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
 	"testing"
 
 	"postgres-provisioner/internal/config"
@@ -388,6 +392,760 @@ func TestQuoteLiteral(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("quoteLiteral(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestRoleOptionsClauses(t *testing.T) {
+	boolTrue := true
+	boolFalse := false
+	connLimit := 10
+	connLimitUnlimited := -1
+
+	tests := []struct {
+		name string
+		opts config.RoleOptions
+		want []string
+	}{
+		{"empty options", config.RoleOptions{}, nil},
+		{"login true", config.RoleOptions{Login: &boolTrue}, []string{"LOGIN"}},
+		{"login false", config.RoleOptions{Login: &boolFalse}, []string{"NOLOGIN"}},
+		{"superuser true", config.RoleOptions{Superuser: &boolTrue}, []string{"SUPERUSER"}},
+		{"superuser false", config.RoleOptions{Superuser: &boolFalse}, []string{"NOSUPERUSER"}},
+		{"createdb true", config.RoleOptions{CreateDB: &boolTrue}, []string{"CREATEDB"}},
+		{"createdb false", config.RoleOptions{CreateDB: &boolFalse}, []string{"NOCREATEDB"}},
+		{"createrole true", config.RoleOptions{CreateRole: &boolTrue}, []string{"CREATEROLE"}},
+		{"createrole false", config.RoleOptions{CreateRole: &boolFalse}, []string{"NOCREATEROLE"}},
+		{"connection limit", config.RoleOptions{ConnectionLimit: &connLimit}, []string{"CONNECTION LIMIT 10"}},
+		{"connection limit unlimited", config.RoleOptions{ConnectionLimit: &connLimitUnlimited}, []string{"CONNECTION LIMIT -1"}},
+		{"all options", config.RoleOptions{
+			Login:           &boolTrue,
+			Superuser:       &boolFalse,
+			CreateDB:        &boolTrue,
+			CreateRole:      &boolFalse,
+			ConnectionLimit: &connLimit,
+		}, []string{"LOGIN", "NOSUPERUSER", "CREATEDB", "NOCREATEROLE", "CONNECTION LIMIT 10"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := roleOptionsClauses(tt.opts)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("clause[%d]: got %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestAlterRoleNoChanges(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	role := config.Role{
+		Name: "existing",
+		// No password, no options → nothing to alter
+	}
+
+	// roleExists query returns true
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("existing").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	// No ALTER expected — alterRole returns early with "no changes"
+
+	p := &Provisioner{adminDB: mockDB}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureDatabaseExistsNoOwner(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name: "existingdb",
+		// No owner
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("existingdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	// No ALTER expected — empty owner
+
+	p := &Provisioner{adminDB: mockDB}
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false for existing database without owner")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateDatabaseNoOwner(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name: "newdb",
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("newdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	mock.ExpectExec(`CREATE DATABASE "newdb"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true for new database")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyGrantNoTarget(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{
+		Role:       "reader",
+		Privileges: []string{"SELECT"},
+		// No target specified
+	}
+
+	database := config.Database{Name: "mydb"}
+	p := &Provisioner{}
+	err = p.applyGrant(context.Background(), mockDB, database, grant)
+	if err == nil {
+		t.Fatal("expected error for grant with no target")
+	}
+	if err.Error() != "no grant target specified" {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestGrantOnTablesInSchemaNoOwner(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{
+		Role:             "reader",
+		Privileges:       []string{"SELECT"},
+		OnTablesInSchema: "app",
+	}
+
+	// Grant on existing tables
+	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// Default privileges for admin user
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// No third exec — empty schemaOwner skips the FOR ROLE clause
+
+	database := config.Database{
+		Name: "mydb",
+		// No owner
+	}
+	p := &Provisioner{}
+	if err := p.applyGrant(context.Background(), mockDB, database, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnTablesInSchemaWithSchemaOwnerOverride(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{
+		Role:             "reader",
+		Privileges:       []string{"SELECT"},
+		OnTablesInSchema: "app",
+	}
+
+	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "schema_owner" IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	database := config.Database{
+		Name:  "mydb",
+		Owner: "db_owner",
+		Schemas: []config.Schema{
+			{Name: "app", Owner: "schema_owner"},
+		},
+	}
+	p := &Provisioner{}
+	if err := p.applyGrant(context.Background(), mockDB, database, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureSchemaNoOwner(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// No ALTER SCHEMA expected — empty owner
+
+	p := &Provisioner{}
+	if err := p.ensureSchema(context.Background(), mockDB, "app", "", "update"); err != nil {
+		t.Fatalf("ensureSchema: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionDatabaseResources(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:       "testdb",
+		Owner:      "appuser",
+		Extensions: []string{"uuid-ossp"},
+		Schemas: []config.Schema{
+			{Name: "app", Owner: "appuser"},
+		},
+		Grants: []config.Grant{
+			{
+				Role:       "appuser",
+				Privileges: []string{"ALL"},
+				OnSchema:   "app",
+			},
+		},
+	}
+
+	// Extension
+	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// Schema
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "appuser"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// Grant
+	mock.ExpectExec(`GRANT ALL ON SCHEMA "app" TO "appuser"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionDatabaseResourcesMigrationsDisabled(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name: "testdb",
+		Migrations: &config.Migrations{
+			Directory: "/some/path",
+		},
+	}
+
+	p := &Provisioner{opts: Options{MigrationsEnabled: false}}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionDatabaseResourcesExtensionError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:       "testdb",
+		Extensions: []string{"bad_ext"},
+	}
+
+	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "bad_ext"`).
+		WillReturnError(fmt.Errorf("extension not available"))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.provisionDatabaseResources(context.Background(), mockDB, database, "update")
+	if err == nil {
+		t.Fatal("expected error for failed extension")
+	}
+}
+
+func TestProvisionDatabaseResourcesSchemaError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:    "testdb",
+		Schemas: []config.Schema{{Name: "bad_schema"}},
+	}
+
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "bad_schema"`).
+		WillReturnError(fmt.Errorf("permission denied"))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.provisionDatabaseResources(context.Background(), mockDB, database, "update")
+	if err == nil {
+		t.Fatal("expected error for failed schema creation")
+	}
+}
+
+func TestProvisionDatabaseResourcesGrantError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name: "testdb",
+		Grants: []config.Grant{
+			{
+				Role:       "baduser",
+				Privileges: []string{"ALL"},
+				OnSchema:   "public",
+			},
+		},
+	}
+
+	mock.ExpectExec(`GRANT ALL ON SCHEMA "public" TO "baduser"`).
+		WillReturnError(fmt.Errorf("role does not exist"))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.provisionDatabaseResources(context.Background(), mockDB, database, "update")
+	if err == nil {
+		t.Fatal("expected error for failed grant")
+	}
+}
+
+func TestProvisionDatabaseResourcesSchemaOwnerFallback(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// Schema with no owner should fall back to database owner
+	database := config.Database{
+		Name:  "testdb",
+		Owner: "db_owner",
+		Schemas: []config.Schema{
+			{Name: "app"}, // no owner specified
+		},
+	}
+
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "db_owner"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnTablesInSchemaGrantError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{
+		Role:             "reader",
+		Privileges:       []string{"SELECT"},
+		OnTablesInSchema: "app",
+	}
+
+	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
+		WillReturnError(fmt.Errorf("schema does not exist"))
+
+	database := config.Database{Name: "mydb", Owner: "owner"}
+	p := &Provisioner{}
+	err = p.applyGrant(context.Background(), mockDB, database, grant)
+	if err == nil {
+		t.Fatal("expected error for failed grant on tables")
+	}
+}
+
+func TestGrantOnTablesInSchemaDefaultPrivError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{
+		Role:             "reader",
+		Privileges:       []string{"SELECT"},
+		OnTablesInSchema: "app",
+	}
+
+	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
+		WillReturnError(fmt.Errorf("permission denied"))
+
+	database := config.Database{Name: "mydb", Owner: "owner"}
+	p := &Provisioner{}
+	err = p.applyGrant(context.Background(), mockDB, database, grant)
+	if err == nil {
+		t.Fatal("expected error for failed default privileges")
+	}
+}
+
+func TestGrantOnTablesInSchemaOwnerDefaultPrivError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{
+		Role:             "reader",
+		Privileges:       []string{"SELECT"},
+		OnTablesInSchema: "app",
+	}
+
+	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "owner" IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
+		WillReturnError(fmt.Errorf("role does not exist"))
+
+	database := config.Database{Name: "mydb", Owner: "owner"}
+	p := &Provisioner{}
+	err = p.applyGrant(context.Background(), mockDB, database, grant)
+	if err == nil {
+		t.Fatal("expected error for failed owner default privileges")
+	}
+}
+
+func TestEnsureSchemaCreateError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "bad"`).
+		WillReturnError(fmt.Errorf("permission denied"))
+
+	p := &Provisioner{}
+	err = p.ensureSchema(context.Background(), mockDB, "bad", "owner", "update")
+	if err == nil {
+		t.Fatal("expected error for failed schema creation")
+	}
+}
+
+func TestEnsureSchemaAlterOwnerError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "baduser"`).
+		WillReturnError(fmt.Errorf("role does not exist"))
+
+	p := &Provisioner{}
+	err = p.ensureSchema(context.Background(), mockDB, "app", "baduser", "update")
+	if err == nil {
+		t.Fatal("expected error for failed ALTER SCHEMA OWNER")
+	}
+}
+
+func TestProvisionDatabaseResourcesWithMigrations(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	content := "CREATE TABLE t (id int);"
+	if writeErr := os.WriteFile(dir+"/V0001__init.sql", []byte(content), 0644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	database := config.Database{
+		Name: "testdb",
+		Migrations: &config.Migrations{
+			Directory: dir,
+		},
+	}
+
+	// ensureMigrationTable
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS _schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// loadAppliedMigrations - empty
+	mock.ExpectQuery("SELECT version, type, checksum FROM _schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"version", "type", "checksum"}))
+
+	// executeMigration
+	hash := sha256.Sum256([]byte(content))
+	checksum := hex.EncodeToString(hash[:])
+
+	mock.ExpectBegin()
+	mock.ExpectExec("CREATE TABLE t").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO _schema_migrations").
+		WithArgs("0001", "versioned", "init", "V0001__init.sql", checksum).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	p := &Provisioner{opts: Options{MigrationsEnabled: true}}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProvisionDatabaseResourcesMigrationsError(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name: "testdb",
+		Migrations: &config.Migrations{
+			Directory: "/nonexistent/path",
+		},
+	}
+
+	p := &Provisioner{opts: Options{MigrationsEnabled: true}}
+	err = p.provisionDatabaseResources(context.Background(), mockDB, database, "update")
+	if err == nil {
+		t.Fatal("expected error for failed migrations")
+	}
+}
+
+func TestEnsureRoleExistsQueryError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("testuser").
+		WillReturnError(fmt.Errorf("connection lost"))
+
+	p := &Provisioner{adminDB: mockDB}
+	err = p.ensureRole(context.Background(), config.Role{Name: "testuser"}, "update")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestEnsureDatabaseExistsQueryError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("testdb").
+		WillReturnError(fmt.Errorf("connection lost"))
+
+	p := &Provisioner{adminDB: mockDB}
+	_, err = p.ensureDatabase(context.Background(), config.Database{Name: "testdb"}, "update")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestEnsureRoleCreateWithOptions(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	boolTrue := true
+	boolFalse := false
+	connLimit := 5
+
+	role := config.Role{
+		Name:     "fulluser",
+		Password: "pass",
+		Options: config.RoleOptions{
+			Login:           &boolTrue,
+			Superuser:       &boolFalse,
+			CreateDB:        &boolTrue,
+			CreateRole:      &boolFalse,
+			ConnectionLimit: &connLimit,
+		},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("fulluser").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	mock.ExpectExec(`CREATE ROLE "fulluser" WITH PASSWORD 'pass' LOGIN NOSUPERUSER CREATEDB NOCREATEROLE CONNECTION LIMIT 5`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureRoleAlterWithOptions(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	boolTrue := true
+	role := config.Role{
+		Name:    "existing",
+		Options: config.RoleOptions{Superuser: &boolTrue},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("existing").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	mock.ExpectExec(`ALTER ROLE "existing" WITH SUPERUSER`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateRoleNoPassword(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	login := true
+	role := config.Role{
+		Name:    "nopwuser",
+		Options: config.RoleOptions{Login: &login},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("nopwuser").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	mock.ExpectExec(`CREATE ROLE "nopwuser" LOGIN`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
