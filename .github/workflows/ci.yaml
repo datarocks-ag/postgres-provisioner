@@ -122,7 +122,7 @@ jobs:
         run: CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o postgres-provisioner ./cmd/postgres-provisioner
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: postgres-provisioner
           path: postgres-provisioner
