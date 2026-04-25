@@ -98,6 +98,22 @@ func (p *Provisioner) Run(ctx context.Context) error {
 			continue
 		}
 
+		// In dry-run mode, a "created" database wasn't actually created — connecting
+		// to it would block until the retry timeout expires. Log a summary of what
+		// would happen and skip the per-database connect/provision step. When the
+		// database already existed (created=false), we can safely connect and the
+		// sub-resource mutations will continue to be previewed.
+		if p.opts.DryRun && created {
+			slog.Info("[DRY RUN] would connect to newly-created database and provision per-database resources",
+				"database", database.Name,
+				"extensions", len(database.Extensions),
+				"schemas", len(database.Schemas),
+				"grants", len(database.Grants),
+				"migrations", database.Migrations != nil && database.Migrations.Directory != "",
+			)
+			continue
+		}
+
 		dbConn, err := db.ConnectToDatabase(ctx, p.connCfg, database.Name)
 		if err != nil {
 			return fmt.Errorf("connecting to database %q: %w", database.Name, err)

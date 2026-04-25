@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,8 +14,14 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/lib/pq"
+
 	"postgres-provisioner/internal/config"
 )
+
+// pgUndefinedTable is the SQLSTATE code Postgres returns when a referenced relation
+// does not exist (e.g. _schema_migrations on a fresh database).
+const pgUndefinedTable = "42P01"
 
 // MigrationType distinguishes versioned (run-once) from repeatable (re-run on change) migrations.
 type MigrationType string
@@ -244,9 +251,17 @@ func (p *Provisioner) dryRunMigrations(ctx context.Context, dbConn *sql.DB, dbNa
 
 	applied, err := loadAppliedMigrations(ctx, dbConn)
 	if err != nil {
-		// Most likely the table doesn't exist yet — treat as zero applied.
-		slog.Info("[DRY RUN] tracking table not readable; assuming all migrations would be applied",
-			"database", dbName, "reason", err.Error())
+		// On a fresh database the tracking table won't exist yet — Postgres returns
+		// SQLSTATE 42P01 (undefined_table). In that specific case we want the dry-run
+		// to surface the full plan, treating zero migrations as applied. Any other
+		// error (permission denied, connection lost, …) must propagate so users don't
+		// get a misleading plan based on a hidden failure.
+		var pqErr *pq.Error
+		if !errors.As(err, &pqErr) || pqErr.Code != pgUndefinedTable {
+			return fmt.Errorf("loading applied migrations: %w", err)
+		}
+		slog.Info("[DRY RUN] tracking table does not exist; assuming all migrations would be applied",
+			"database", dbName)
 		applied = map[string]migrationRecord{}
 	}
 

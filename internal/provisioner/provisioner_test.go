@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"postgres-provisioner/internal/db"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/lib/pq"
 )
 
 func TestEnsureRoleCreate(t *testing.T) {
@@ -1373,15 +1375,49 @@ func TestDryRunMigrationsLogsPlanWithoutExecuting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// loadAppliedMigrations is read-only and runs even in dry-run; simulate "table missing"
-	// so the dry-run plan reports both migrations as "would apply".
+	// loadAppliedMigrations is read-only and runs even in dry-run; simulate the precise
+	// "undefined table" Postgres error (SQLSTATE 42P01) so the dry-run plan reports both
+	// migrations as "would apply". Any other error must propagate (see the test below).
 	mock.ExpectQuery(`SELECT version, type, checksum FROM _schema_migrations`).
-		WillReturnError(fmt.Errorf("relation \"_schema_migrations\" does not exist"))
+		WillReturnError(&pq.Error{Code: pgUndefinedTable, Message: `relation "_schema_migrations" does not exist`})
 
 	// No CREATE TABLE, no BeginTx, no Exec — dry-run must not mutate.
 	p := &Provisioner{opts: dryRunOptions()}
 	if err := p.runMigrations(context.Background(), mockDB, "appdb", config.Migrations{Directory: dir}); err != nil {
 		t.Fatalf("runMigrations: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunMigrationsPropagatesNonMissingTableErrors(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "V0001__init.sql"), []byte("SELECT 1;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A permission-denied error (or any error other than 42P01) must be surfaced —
+	// silently treating it as "no applied migrations" would mask real problems and
+	// produce a misleading dry-run plan.
+	wantErr := &pq.Error{Code: "42501", Message: "permission denied for table _schema_migrations"}
+	mock.ExpectQuery(`SELECT version, type, checksum FROM _schema_migrations`).
+		WillReturnError(wantErr)
+
+	p := &Provisioner{opts: dryRunOptions()}
+	err = p.runMigrations(context.Background(), mockDB, "appdb", config.Migrations{Directory: dir})
+	if err == nil {
+		t.Fatal("expected error to propagate, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected wrapped pq.Error to propagate, got: %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
