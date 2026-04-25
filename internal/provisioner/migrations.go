@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,8 +14,14 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/lib/pq"
+
 	"postgres-provisioner/internal/config"
 )
+
+// pgUndefinedTable is the SQLSTATE code Postgres returns when a referenced relation
+// does not exist (e.g. _schema_migrations on a fresh database).
+const pgUndefinedTable = "42P01"
 
 // MigrationType distinguishes versioned (run-once) from repeatable (re-run on change) migrations.
 type MigrationType string
@@ -169,6 +176,11 @@ func loadAppliedMigrations(ctx context.Context, dbConn *sql.DB) (map[string]migr
 }
 
 // runMigrations orchestrates migration discovery and execution for a single database.
+//
+// In dry-run mode, the tracking table is not created and migrations are not executed;
+// instead, each discovered migration is logged with its planned action (apply,
+// re-execute, or skip). If the tracking table is missing, all migrations are reported
+// as "would apply".
 func (p *Provisioner) runMigrations(ctx context.Context, dbConn *sql.DB, dbName string, migrations config.Migrations) error {
 	slog.Info("Running migrations", "database", dbName, "directory", migrations.Directory)
 
@@ -180,6 +192,10 @@ func (p *Provisioner) runMigrations(ctx context.Context, dbConn *sql.DB, dbName 
 	if len(files) == 0 {
 		slog.Info("No migration files found", "database", dbName, "directory", migrations.Directory)
 		return nil
+	}
+
+	if p.opts.DryRun {
+		return p.dryRunMigrations(ctx, dbConn, dbName, files)
 	}
 
 	if err := ensureMigrationTable(ctx, dbConn); err != nil {
@@ -223,6 +239,55 @@ func (p *Provisioner) runMigrations(ctx context.Context, dbConn *sql.DB, dbName 
 	}
 
 	slog.Info("Migrations complete", "database", dbName, "total_files", len(files))
+	return nil
+}
+
+// dryRunMigrations reports the planned migration actions without executing or
+// modifying the tracking table. A missing tracking table is treated as zero
+// applied migrations rather than an error, so a dry-run against a fresh
+// database surfaces the full plan.
+func (p *Provisioner) dryRunMigrations(ctx context.Context, dbConn *sql.DB, dbName string, files []MigrationFile) error {
+	slog.Info("[DRY RUN] would create migration tracking table if missing", "sql", createMigrationTableSQL)
+
+	applied, err := loadAppliedMigrations(ctx, dbConn)
+	if err != nil {
+		// On a fresh database the tracking table won't exist yet — Postgres returns
+		// SQLSTATE 42P01 (undefined_table). In that specific case we want the dry-run
+		// to surface the full plan, treating zero migrations as applied. Any other
+		// error (permission denied, connection lost, …) must propagate so users don't
+		// get a misleading plan based on a hidden failure.
+		var pqErr *pq.Error
+		if !errors.As(err, &pqErr) || pqErr.Code != pgUndefinedTable {
+			return fmt.Errorf("loading applied migrations: %w", err)
+		}
+		slog.Info("[DRY RUN] tracking table does not exist; assuming all migrations would be applied",
+			"database", dbName)
+		applied = map[string]migrationRecord{}
+	}
+
+	for _, mf := range files {
+		key := mf.Version + ":" + string(mf.Type)
+		rec, alreadyApplied := applied[key]
+
+		switch {
+		case !alreadyApplied:
+			slog.Info("[DRY RUN] would apply migration",
+				"file", mf.Filename, "type", mf.Type, "database", dbName)
+		case rec.Checksum == mf.Checksum:
+			// Logged at Info (not Debug) so the dry-run plan is complete at the
+			// default LOG_LEVEL — users expect to see every file and its decision.
+			slog.Info("[DRY RUN] migration already applied — would skip",
+				"file", mf.Filename, "database", dbName)
+		case mf.Type == MigrationVersioned:
+			return fmt.Errorf("checksum mismatch for versioned migration %q in database %q: expected %s, got %s (versioned migrations are immutable)",
+				mf.Filename, dbName, rec.Checksum, mf.Checksum)
+		default:
+			slog.Info("[DRY RUN] would re-execute repeatable migration (content changed)",
+				"file", mf.Filename, "database", dbName)
+		}
+	}
+
+	slog.Info("[DRY RUN] migration plan complete", "database", dbName, "total_files", len(files))
 	return nil
 }
 

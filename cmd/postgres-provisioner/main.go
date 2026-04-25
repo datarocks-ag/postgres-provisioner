@@ -29,8 +29,18 @@ func main() {
 		}
 		migrationsDefault = parsed
 	}
+	dryRunDefault := false
+	if raw := os.Getenv("DRY_RUN"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			slog.Error("Invalid DRY_RUN value (expected true/false/1/0)", "value", raw)
+			os.Exit(1)
+		}
+		dryRunDefault = parsed
+	}
 	showVersion := flag.Bool("version", false, "print version and exit")
 	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
+	dryRun := flag.Bool("dry-run", dryRunDefault, "log mutations as a preview without executing them (env: DRY_RUN)")
 	flag.Parse()
 
 	if *showVersion {
@@ -79,6 +89,7 @@ func main() {
 
 	p := provisioner.New(adminDB, connCfg, cfg, provisioner.Options{
 		MigrationsEnabled: *migrationsEnabled,
+		DryRun:            *dryRun,
 	})
 	if err := p.Run(ctx); err != nil {
 		slog.Error("Provisioning failed", "error", err)

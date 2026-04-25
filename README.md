@@ -66,6 +66,7 @@ databases:
 | `POSTGRES_SSLMODE` | no | `disable` | SSL mode |
 | `PGHELPER_CONFIG_PATH` | no | `./config.yaml` | Path to YAML config |
 | `MIGRATIONS_ENABLED` | no | `true` | Set to `false` to skip all migrations at runtime |
+| `DRY_RUN` | no | `false` | Set to `true` to log every mutation as a preview without applying it |
 | `LOG_LEVEL` | no | `info` | Log level (debug/info/warn/error) |
 
 ## Strategy
@@ -139,6 +140,8 @@ Migrations can be disabled without changing the config file using the `--migrati
 | Flag | Default | Description |
 |---|---|---|
 | `--migrations` | `true` (or `MIGRATIONS_ENABLED` env var) | Enable/disable migrations |
+| `--dry-run` | `false` (or `DRY_RUN` env var) | Log mutations as a preview without executing them. Read-only queries (existence checks, applied-migration lookups) still run so the preview reflects live state. The CLI flag takes precedence over the env var. |
+| `--version` | — | Print version and exit |
 
 ## SSL Mode
 
