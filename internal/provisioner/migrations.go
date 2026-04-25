@@ -169,6 +169,11 @@ func loadAppliedMigrations(ctx context.Context, dbConn *sql.DB) (map[string]migr
 }
 
 // runMigrations orchestrates migration discovery and execution for a single database.
+//
+// In dry-run mode, the tracking table is not created and migrations are not executed;
+// instead, each discovered migration is logged with its planned action (apply,
+// re-execute, or skip). If the tracking table is missing, all migrations are reported
+// as "would apply".
 func (p *Provisioner) runMigrations(ctx context.Context, dbConn *sql.DB, dbName string, migrations config.Migrations) error {
 	slog.Info("Running migrations", "database", dbName, "directory", migrations.Directory)
 
@@ -180,6 +185,10 @@ func (p *Provisioner) runMigrations(ctx context.Context, dbConn *sql.DB, dbName 
 	if len(files) == 0 {
 		slog.Info("No migration files found", "database", dbName, "directory", migrations.Directory)
 		return nil
+	}
+
+	if p.opts.DryRun {
+		return p.dryRunMigrations(ctx, dbConn, dbName, files)
 	}
 
 	if err := ensureMigrationTable(ctx, dbConn); err != nil {
@@ -223,6 +232,45 @@ func (p *Provisioner) runMigrations(ctx context.Context, dbConn *sql.DB, dbName 
 	}
 
 	slog.Info("Migrations complete", "database", dbName, "total_files", len(files))
+	return nil
+}
+
+// dryRunMigrations reports the planned migration actions without executing or
+// modifying the tracking table. A missing tracking table is treated as zero
+// applied migrations rather than an error, so a dry-run against a fresh
+// database surfaces the full plan.
+func (p *Provisioner) dryRunMigrations(ctx context.Context, dbConn *sql.DB, dbName string, files []MigrationFile) error {
+	slog.Info("[DRY RUN] would create migration tracking table if missing", "sql", createMigrationTableSQL)
+
+	applied, err := loadAppliedMigrations(ctx, dbConn)
+	if err != nil {
+		// Most likely the table doesn't exist yet — treat as zero applied.
+		slog.Info("[DRY RUN] tracking table not readable; assuming all migrations would be applied",
+			"database", dbName, "reason", err.Error())
+		applied = map[string]migrationRecord{}
+	}
+
+	for _, mf := range files {
+		key := mf.Version + ":" + string(mf.Type)
+		rec, alreadyApplied := applied[key]
+
+		switch {
+		case !alreadyApplied:
+			slog.Info("[DRY RUN] would apply migration",
+				"file", mf.Filename, "type", mf.Type, "database", dbName)
+		case rec.Checksum == mf.Checksum:
+			slog.Debug("[DRY RUN] migration already applied — would skip",
+				"file", mf.Filename, "database", dbName)
+		case mf.Type == MigrationVersioned:
+			return fmt.Errorf("checksum mismatch for versioned migration %q in database %q: expected %s, got %s (versioned migrations are immutable)",
+				mf.Filename, dbName, rec.Checksum, mf.Checksum)
+		default:
+			slog.Info("[DRY RUN] would re-execute repeatable migration (content changed)",
+				"file", mf.Filename, "database", dbName)
+		}
+	}
+
+	slog.Info("[DRY RUN] migration plan complete", "database", dbName, "total_files", len(files))
 	return nil
 }
 

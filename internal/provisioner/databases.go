@@ -21,13 +21,13 @@ func (p *Provisioner) ensureDatabase(ctx context.Context, database config.Databa
 		}
 		slog.Info("Database already exists", "database", database.Name)
 		if database.Owner != "" {
-			return false, alterDatabaseOwner(ctx, p.adminDB, database.Name, database.Owner)
+			return false, p.alterDatabaseOwner(ctx, database.Name, database.Owner)
 		}
 		return false, nil
 	}
 
 	slog.Info("Creating database", "database", database.Name)
-	return true, createDatabase(ctx, p.adminDB, database)
+	return true, p.createDatabase(ctx, database)
 }
 
 func databaseExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
@@ -38,17 +38,17 @@ func databaseExists(ctx context.Context, db *sql.DB, name string) (bool, error) 
 	return exists, err
 }
 
-func createDatabase(ctx context.Context, db *sql.DB, database config.Database) error {
+func (p *Provisioner) createDatabase(ctx context.Context, database config.Database) error {
 	query := "CREATE DATABASE " + quoteIdentifier(database.Name)
 	if database.Owner != "" {
 		query += " OWNER " + quoteIdentifier(database.Owner)
 	}
-	_, err := db.ExecContext(ctx, query)
+	_, err := p.execMutation(ctx, p.adminDB, query)
 	return err
 }
 
-func alterDatabaseOwner(ctx context.Context, db *sql.DB, dbName, owner string) error {
+func (p *Provisioner) alterDatabaseOwner(ctx context.Context, dbName, owner string) error {
 	query := "ALTER DATABASE " + quoteIdentifier(dbName) + " OWNER TO " + quoteIdentifier(owner)
-	_, err := db.ExecContext(ctx, query)
+	_, err := p.execMutation(ctx, p.adminDB, query)
 	return err
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"postgres-provisioner/internal/config"
@@ -336,6 +337,7 @@ func TestGrantOnTablesInSchema(t *testing.T) {
 		OnTablesInSchema: "app",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -344,6 +346,7 @@ func TestGrantOnTablesInSchema(t *testing.T) {
 
 	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "appowner" IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
 
 	database := config.Database{
 		Name:  "mydb",
@@ -570,6 +573,7 @@ func TestGrantOnTablesInSchemaNoOwner(t *testing.T) {
 		OnTablesInSchema: "app",
 	}
 
+	mock.ExpectBegin()
 	// Grant on existing tables
 	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -579,6 +583,7 @@ func TestGrantOnTablesInSchemaNoOwner(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// No third exec — empty schemaOwner skips the FOR ROLE clause
+	mock.ExpectCommit()
 
 	database := config.Database{
 		Name: "mydb",
@@ -607,6 +612,7 @@ func TestGrantOnTablesInSchemaWithSchemaOwnerOverride(t *testing.T) {
 		OnTablesInSchema: "app",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -615,6 +621,7 @@ func TestGrantOnTablesInSchemaWithSchemaOwnerOverride(t *testing.T) {
 
 	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "schema_owner" IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
 
 	database := config.Database{
 		Name:  "mydb",
@@ -842,14 +849,19 @@ func TestGrantOnTablesInSchemaGrantError(t *testing.T) {
 		OnTablesInSchema: "app",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
 		WillReturnError(fmt.Errorf("schema does not exist"))
+	mock.ExpectRollback()
 
 	database := config.Database{Name: "mydb", Owner: "owner"}
 	p := &Provisioner{}
 	err = p.applyGrant(context.Background(), mockDB, database, grant)
 	if err == nil {
 		t.Fatal("expected error for failed grant on tables")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -866,16 +878,21 @@ func TestGrantOnTablesInSchemaDefaultPrivError(t *testing.T) {
 		OnTablesInSchema: "app",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
 		WillReturnError(fmt.Errorf("permission denied"))
+	mock.ExpectRollback()
 
 	database := config.Database{Name: "mydb", Owner: "owner"}
 	p := &Provisioner{}
 	err = p.applyGrant(context.Background(), mockDB, database, grant)
 	if err == nil {
 		t.Fatal("expected error for failed default privileges")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -892,18 +909,23 @@ func TestGrantOnTablesInSchemaOwnerDefaultPrivError(t *testing.T) {
 		OnTablesInSchema: "app",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectExec(`GRANT SELECT ON ALL TABLES IN SCHEMA "app" TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "owner" IN SCHEMA "app" GRANT SELECT ON TABLES TO "reader"`).
 		WillReturnError(fmt.Errorf("role does not exist"))
+	mock.ExpectRollback()
 
 	database := config.Database{Name: "mydb", Owner: "owner"}
 	p := &Provisioner{}
 	err = p.applyGrant(context.Background(), mockDB, database, grant)
 	if err == nil {
 		t.Fatal("expected error for failed owner default privileges")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1201,6 +1223,165 @@ func TestRunFullProvisioning(t *testing.T) {
 		if _, err := p.ensureDatabase(ctx, database, strategy); err != nil {
 			t.Fatalf("ensureDatabase: %v", err)
 		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dryRunOptions returns Options with dry-run enabled and migrations enabled by default.
+func dryRunOptions() Options {
+	opts := DefaultOptions()
+	opts.DryRun = true
+	return opts
+}
+
+func TestDryRunRoleCreate(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// Existence check still runs
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("alice").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	// CREATE ROLE must NOT be executed in dry-run mode
+
+	role := config.Role{Name: "alice", Password: "s3cret"}
+	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunRoleAlter(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("alice").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	// ALTER ROLE must NOT be executed in dry-run mode
+
+	role := config.Role{Name: "alice", Password: "rotated"}
+	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunDatabaseCreate(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("appdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	// CREATE DATABASE must NOT be executed in dry-run mode
+
+	database := config.Database{Name: "appdb", Owner: "appuser"}
+	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if !created {
+		t.Errorf("expected created=true (the create was previewed), got false")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunSchemaAndExtension(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// No Exec expectations — both must be skipped in dry-run mode.
+	p := &Provisioner{opts: dryRunOptions()}
+
+	if err := p.ensureExtension(context.Background(), mockDB, "uuid-ossp"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "update"); err != nil {
+		t.Fatalf("ensureSchema: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunGrantOnTablesInSchemaSkipsTransaction(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// No ExpectBegin / ExpectExec / ExpectCommit — dry-run must not open a transaction.
+	grant := config.Grant{
+		Role:             "reader",
+		Privileges:       []string{"SELECT"},
+		OnTablesInSchema: "app",
+	}
+	database := config.Database{Name: "mydb", Owner: "appowner"}
+	p := &Provisioner{opts: dryRunOptions()}
+	if err := p.applyGrant(context.Background(), mockDB, database, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunMigrationsLogsPlanWithoutExecuting(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// Two migration files in a temp dir — discoverMigrations reads them.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "V0001__init.sql"), []byte("SELECT 1;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "R0001__view.sql"), []byte("SELECT 2;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// loadAppliedMigrations is read-only and runs even in dry-run; simulate "table missing"
+	// so the dry-run plan reports both migrations as "would apply".
+	mock.ExpectQuery(`SELECT version, type, checksum FROM _schema_migrations`).
+		WillReturnError(fmt.Errorf("relation \"_schema_migrations\" does not exist"))
+
+	// No CREATE TABLE, no BeginTx, no Exec — dry-run must not mutate.
+	p := &Provisioner{opts: dryRunOptions()}
+	if err := p.runMigrations(context.Background(), mockDB, "appdb", config.Migrations{Directory: dir}); err != nil {
+		t.Fatalf("runMigrations: %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

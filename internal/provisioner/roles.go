@@ -22,11 +22,11 @@ func (p *Provisioner) ensureRole(ctx context.Context, role config.Role, strategy
 			return nil
 		}
 		slog.Info("Role already exists, updating", "role", role.Name)
-		return alterRole(ctx, p.adminDB, role)
+		return p.alterRole(ctx, role)
 	}
 
 	slog.Info("Creating role", "role", role.Name)
-	return createRole(ctx, p.adminDB, role)
+	return p.createRole(ctx, role)
 }
 
 func roleExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
@@ -37,7 +37,7 @@ func roleExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	return exists, err
 }
 
-func createRole(ctx context.Context, db *sql.DB, role config.Role) error {
+func (p *Provisioner) createRole(ctx context.Context, role config.Role) error {
 	var parts []string
 	parts = append(parts, "CREATE ROLE "+quoteIdentifier(role.Name))
 
@@ -48,11 +48,11 @@ func createRole(ctx context.Context, db *sql.DB, role config.Role) error {
 	parts = append(parts, roleOptionsClauses(role.Options)...)
 
 	query := strings.Join(parts, " ")
-	_, err := db.ExecContext(ctx, query)
+	_, err := p.execMutation(ctx, p.adminDB, query)
 	return err
 }
 
-func alterRole(ctx context.Context, db *sql.DB, role config.Role) error {
+func (p *Provisioner) alterRole(ctx context.Context, role config.Role) error {
 	var clauses []string
 
 	if role.Password != "" {
@@ -67,7 +67,7 @@ func alterRole(ctx context.Context, db *sql.DB, role config.Role) error {
 	}
 
 	query := "ALTER ROLE " + quoteIdentifier(role.Name) + " WITH " + strings.Join(clauses, " ")
-	_, err := db.ExecContext(ctx, query)
+	_, err := p.execMutation(ctx, p.adminDB, query)
 	return err
 }
 
