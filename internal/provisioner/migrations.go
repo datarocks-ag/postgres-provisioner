@@ -274,7 +274,9 @@ func (p *Provisioner) dryRunMigrations(ctx context.Context, dbConn *sql.DB, dbNa
 			slog.Info("[DRY RUN] would apply migration",
 				"file", mf.Filename, "type", mf.Type, "database", dbName)
 		case rec.Checksum == mf.Checksum:
-			slog.Debug("[DRY RUN] migration already applied — would skip",
+			// Logged at Info (not Debug) so the dry-run plan is complete at the
+			// default LOG_LEVEL — users expect to see every file and its decision.
+			slog.Info("[DRY RUN] migration already applied — would skip",
 				"file", mf.Filename, "database", dbName)
 		case mf.Type == MigrationVersioned:
 			return fmt.Errorf("checksum mismatch for versioned migration %q in database %q: expected %s, got %s (versioned migrations are immutable)",

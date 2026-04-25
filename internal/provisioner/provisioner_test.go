@@ -6,8 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"postgres-provisioner/internal/config"
@@ -1237,6 +1240,91 @@ func dryRunOptions() Options {
 	opts := DefaultOptions()
 	opts.DryRun = true
 	return opts
+}
+
+func TestRedactSecrets(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "create role with password",
+			in:   `CREATE ROLE "alice" WITH PASSWORD 's3cret'`,
+			want: `CREATE ROLE "alice" WITH PASSWORD '***REDACTED***'`,
+		},
+		{
+			name: "alter role with password and option",
+			in:   `ALTER ROLE "alice" WITH PASSWORD 'rotated' LOGIN`,
+			want: `ALTER ROLE "alice" WITH PASSWORD '***REDACTED***' LOGIN`,
+		},
+		{
+			name: "password literal containing escaped single-quote",
+			in:   `ALTER ROLE "x" WITH PASSWORD 'it''s'`,
+			want: `ALTER ROLE "x" WITH PASSWORD '***REDACTED***'`,
+		},
+		{
+			name: "case-insensitive PASSWORD keyword",
+			in:   `password 'lower'`,
+			want: `password '***REDACTED***'`,
+		},
+		{
+			name: "no password clause is unchanged",
+			in:   `GRANT SELECT ON TABLE "x" TO "y"`,
+			want: `GRANT SELECT ON TABLE "x" TO "y"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecrets(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecrets(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDryRunRedactsPasswordInLog verifies that the SQL captured by execMutation
+// in dry-run mode does not leak the role password into the slog payload.
+func TestDryRunRedactsPasswordInLog(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("alice").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	// No ExpectExec — dry-run must not execute, but we capture the redacted SQL via slog handler.
+
+	var captured []string
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == "sql" {
+				captured = append(captured, a.Value.String())
+			}
+			return a
+		},
+	})))
+
+	role := config.Role{Name: "alice", Password: "super-secret-pw"}
+	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
+	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 captured sql attr, got %d: %v", len(captured), captured)
+	}
+	if strings.Contains(captured[0], "super-secret-pw") {
+		t.Errorf("dry-run log leaked password literal: %q", captured[0])
+	}
+	if !strings.Contains(captured[0], "***REDACTED***") {
+		t.Errorf("expected redaction marker in dry-run log: %q", captured[0])
+	}
 }
 
 func TestDryRunRoleCreate(t *testing.T) {

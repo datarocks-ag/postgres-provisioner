@@ -101,16 +101,16 @@ func (p *Provisioner) grantOnTablesInSchema(ctx context.Context, dbConn *sql.DB,
 }
 
 func (p *Provisioner) dryRunGrantOnTablesInSchema(schema, privs, role, schemaOwner string) error {
-	slog.Info("[DRY RUN] would execute in transaction",
-		"sql", fmt.Sprintf("GRANT %s ON ALL TABLES IN SCHEMA %s TO %s",
-			privs, quoteIdentifier(schema), role))
-	slog.Info("[DRY RUN] would execute in transaction",
-		"sql", fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT %s ON TABLES TO %s",
-			quoteIdentifier(schema), privs, role))
+	logTx := func(query string) {
+		slog.Info("[DRY RUN] would execute in transaction", "sql", redactSecrets(query))
+	}
+	logTx(fmt.Sprintf("GRANT %s ON ALL TABLES IN SCHEMA %s TO %s",
+		privs, quoteIdentifier(schema), role))
+	logTx(fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT %s ON TABLES TO %s",
+		quoteIdentifier(schema), privs, role))
 	if schemaOwner != "" {
-		slog.Info("[DRY RUN] would execute in transaction",
-			"sql", fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON TABLES TO %s",
-				quoteIdentifier(schemaOwner), quoteIdentifier(schema), privs, role))
+		logTx(fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON TABLES TO %s",
+			quoteIdentifier(schemaOwner), quoteIdentifier(schema), privs, role))
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"postgres-provisioner/internal/config"
@@ -35,9 +36,10 @@ type dbExecer interface {
 
 // execMutation runs a mutation against exec, or logs it as a preview when DryRun is enabled.
 // It returns a no-op sql.Result in dry-run mode so callers can ignore RowsAffected/LastInsertId.
+// Secrets in the SQL (e.g. PASSWORD literals) are redacted before logging.
 func (p *Provisioner) execMutation(ctx context.Context, exec dbExecer, query string, args ...any) (sql.Result, error) {
 	if p.opts.DryRun {
-		slog.Info("[DRY RUN] would execute", "sql", query)
+		slog.Info("[DRY RUN] would execute", "sql", redactSecrets(query))
 		return dryRunResult{}, nil
 	}
 	return exec.ExecContext(ctx, query, args...)
@@ -48,6 +50,17 @@ type dryRunResult struct{}
 
 func (dryRunResult) LastInsertId() (int64, error) { return 0, nil }
 func (dryRunResult) RowsAffected() (int64, error) { return 0, nil }
+
+// passwordLiteralPattern matches a PASSWORD '...' clause, accounting for Postgres's
+// doubled single-quote escaping inside string literals (e.g. 'it''s').
+var passwordLiteralPattern = regexp.MustCompile(`(?i)(PASSWORD\s+)'(?:[^']|'')*'`)
+
+// redactSecrets masks secret literals in SQL so the redacted form is safe to log.
+// Currently it covers PASSWORD '...' clauses, which are the only secret-bearing
+// statements emitted by this package (CREATE/ALTER ROLE).
+func redactSecrets(sql string) string {
+	return passwordLiteralPattern.ReplaceAllString(sql, `${1}'***REDACTED***'`)
+}
 
 // Provisioner orchestrates idempotent PostgreSQL resource provisioning.
 type Provisioner struct {
