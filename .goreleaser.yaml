@@ -28,3 +28,6 @@ changelog:
       - "^docs:"
       - "^test:"
       - "^ci:"
+
+release:
+  replace_existing_artifacts: true
