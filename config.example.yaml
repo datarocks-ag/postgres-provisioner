@@ -26,6 +26,19 @@ roles:
 databases:
   - name: "myapp"
     owner: "app_user"
+    # options: create-time only. These cannot be changed with ALTER DATABASE;
+    # if the database already exists they are ignored (a warning is logged).
+    #   encoding:   character set encoding (e.g. UTF8)
+    #   locale:     sets LC_COLLATE and LC_CTYPE together (mutually exclusive
+    #               with lc_collate / lc_ctype below)
+    #   lc_collate: string sort order (e.g. C)
+    #   lc_ctype:   character classification (e.g. C)
+    #   template:   template database to clone (e.g. template0)
+    # options:
+    #   encoding: "UTF8"
+    #   lc_collate: "C"
+    #   lc_ctype: "C"
+    #   template: "template0"
     extensions:
       - "uuid-ossp"
       - "pgcrypto"

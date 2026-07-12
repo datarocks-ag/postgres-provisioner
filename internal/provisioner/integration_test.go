@@ -330,6 +330,120 @@ databases:
 	}
 }
 
+func TestIntegrationDatabaseWithLocaleOptions(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// The Synapse (matrix) case: a database that hard-requires C collation and
+	// TEMPLATE template0. Exercises CREATE DATABASE ... TEMPLATE/ENCODING/LC_*.
+	configYAML := `
+roles:
+  - name: "synapse"
+    password: "synapsepass"
+    options:
+      login: true
+
+databases:
+  - name: "synapse"
+    owner: "synapse"
+    options:
+      encoding: "UTF8"
+      lc_collate: "C"
+      lc_ctype: "C"
+      template: "template0"
+`
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	assertDatabaseExists(t, adminDB, "synapse")
+
+	var collate, ctype, encoding string
+	err = adminDB.QueryRowContext(ctx,
+		"SELECT datcollate, datctype, pg_encoding_to_char(encoding) FROM pg_database WHERE datname = $1",
+		"synapse",
+	).Scan(&collate, &ctype, &encoding)
+	if err != nil {
+		t.Fatalf("query pg_database for synapse: %v", err)
+	}
+	if collate != "C" {
+		t.Errorf("expected datcollate 'C', got %q", collate)
+	}
+	if ctype != "C" {
+		t.Errorf("expected datctype 'C', got %q", ctype)
+	}
+	if encoding != "UTF8" {
+		t.Errorf("expected encoding 'UTF8', got %q", encoding)
+	}
+
+	// Second run must be idempotent (database exists → warn and continue).
+	p2 := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p2.Run(ctx); err != nil {
+		t.Fatalf("second (idempotent) run failed: %v", err)
+	}
+}
+
+// TestIntegrationConnectWithSpecialCharPassword exercises finding #1 end-to-end:
+// a login role whose password contains URL-special characters ('@' and ':') must
+// still be connectable through db.Connect, which builds the DSN via net/url.
+func TestIntegrationConnectWithSpecialCharPassword(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	const specialPassword = "p@ss:w0rd@Ohshaa3Di:x"
+	configYAML := fmt.Sprintf(`
+roles:
+  - name: "special_user"
+    password: %q
+    options:
+      login: true
+
+databases:
+  - name: "specialdb"
+    owner: "special_user"
+`, specialPassword)
+
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+	p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	// Connect as the special-character-password user — this fails on raw DSN
+	// concatenation ("invalid port") but succeeds once credentials are encoded.
+	userCfg := connCfg
+	userCfg.User = "special_user"
+	userCfg.Password = specialPassword
+	userCfg.DBName = "specialdb"
+	userDB, err := db.Connect(ctx, userCfg)
+	if err != nil {
+		t.Fatalf("connect with special-character password: %v", err)
+	}
+	defer userDB.Close()
+
+	var one int
+	if err := userDB.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+		t.Fatalf("query as special_user: %v", err)
+	}
+	if one != 1 {
+		t.Errorf("expected 1, got %d", one)
+	}
+}
+
 func assertRoleExists(t *testing.T, db *sql.DB, name string) {
 	t.Helper()
 	var exists bool

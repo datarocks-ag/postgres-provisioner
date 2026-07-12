@@ -54,6 +54,26 @@ databases:
       directory: "./migrations/myapp"
 ```
 
+### Database options
+
+Databases accept an optional `options:` block for attributes that are fixed at
+`CREATE DATABASE` time and cannot be changed afterward. They apply only when the
+database is first created; if it already exists the options are ignored and a
+warning is logged.
+
+```yaml
+databases:
+  - name: "synapse"
+    owner: "synapse"
+    options:
+      encoding: "UTF8"       # character set encoding
+      lc_collate: "C"        # string sort order
+      lc_ctype: "C"          # character classification
+      template: "template0"  # template database to clone
+      # locale: "C"          # sets lc_collate + lc_ctype together;
+      #                        mutually exclusive with lc_collate / lc_ctype
+```
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |

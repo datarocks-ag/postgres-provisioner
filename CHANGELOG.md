@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-database create options** — the `databases[].options` block now supports `encoding`, `locale`, `lc_collate`, `lc_ctype`, and `template`, applied at `CREATE DATABASE` time (e.g. `LC_COLLATE 'C' TEMPLATE template0`, required by collation-sensitive apps like Synapse). Options are create-time only: on an existing database they are ignored and a warning is logged, since Postgres cannot `ALTER` them. `locale` is rejected when combined with `lc_collate`/`lc_ctype`.
+
+### Fixed
+
+- **Connection DSN credentials are now percent-encoded** — `ConnConfig.DSN()` builds the connection URL via `net/url` instead of raw string concatenation. Admin/user passwords containing URL-special characters (e.g. `@` or `:`) previously corrupted the parsed host/port (`invalid port`), making the provisioner unable to connect. IPv6 hosts are also bracketed correctly.
+- **Connection errors no longer leak credentials into logs** — the connection-retry `WARN` line now passes the driver error through `redactConnError`, which masks the userinfo section of any embedded connection URL and the raw/percent-escaped password value before logging.
+
 ## [1.1.0] - 2026-04-25
 
 ### Added

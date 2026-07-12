@@ -96,15 +96,32 @@ type Migrations struct {
 	Directory string `yaml:"directory"`
 }
 
+// DatabaseOptions controls CREATE DATABASE attributes that are fixed at
+// creation time and cannot be changed with ALTER DATABASE afterward (encoding,
+// locale, template). They are applied only when the database is first created.
+type DatabaseOptions struct {
+	Encoding  string `yaml:"encoding"`
+	Locale    string `yaml:"locale"`
+	LcCollate string `yaml:"lc_collate"`
+	LcCtype   string `yaml:"lc_ctype"`
+	Template  string `yaml:"template"`
+}
+
+// IsZero reports whether no database option is set.
+func (o DatabaseOptions) IsZero() bool {
+	return o == DatabaseOptions{}
+}
+
 // Database defines a PostgreSQL database to provision.
 type Database struct {
-	Name       string      `yaml:"name"`
-	Owner      string      `yaml:"owner"`
-	Extensions []string    `yaml:"extensions"`
-	Schemas    []Schema    `yaml:"schemas"`
-	Grants     []Grant     `yaml:"grants"`
-	Migrations *Migrations `yaml:"migrations"`
-	Strategy   string      `yaml:"strategy"`
+	Name       string          `yaml:"name"`
+	Owner      string          `yaml:"owner"`
+	Options    DatabaseOptions `yaml:"options"`
+	Extensions []string        `yaml:"extensions"`
+	Schemas    []Schema        `yaml:"schemas"`
+	Grants     []Grant         `yaml:"grants"`
+	Migrations *Migrations     `yaml:"migrations"`
+	Strategy   string          `yaml:"strategy"`
 }
 
 // Config is the top-level YAML configuration.
@@ -139,6 +156,12 @@ func expandConfig(cfg *Config) {
 		cfg.Databases[i].Name = expandEnvVars(cfg.Databases[i].Name)
 		cfg.Databases[i].Strategy = expandEnvVars(cfg.Databases[i].Strategy)
 		cfg.Databases[i].Owner = expandEnvVars(cfg.Databases[i].Owner)
+		opts := &cfg.Databases[i].Options
+		opts.Encoding = expandEnvVars(opts.Encoding)
+		opts.Locale = expandEnvVars(opts.Locale)
+		opts.LcCollate = expandEnvVars(opts.LcCollate)
+		opts.LcCtype = expandEnvVars(opts.LcCtype)
+		opts.Template = expandEnvVars(opts.Template)
 		for j := range cfg.Databases[i].Extensions {
 			cfg.Databases[i].Extensions[j] = expandEnvVars(cfg.Databases[i].Extensions[j])
 		}
@@ -252,6 +275,20 @@ func validate(cfg *Config) error {
 
 		if d.Owner != "" && !roleNames[d.Owner] {
 			return fmt.Errorf("databases[%d].owner: role %q is not declared in roles", i, d.Owner)
+		}
+
+		if err := checkNullBytes(
+			struct{ path, value string }{fmt.Sprintf("databases[%d].options.encoding", i), d.Options.Encoding},
+			struct{ path, value string }{fmt.Sprintf("databases[%d].options.locale", i), d.Options.Locale},
+			struct{ path, value string }{fmt.Sprintf("databases[%d].options.lc_collate", i), d.Options.LcCollate},
+			struct{ path, value string }{fmt.Sprintf("databases[%d].options.lc_ctype", i), d.Options.LcCtype},
+			struct{ path, value string }{fmt.Sprintf("databases[%d].options.template", i), d.Options.Template},
+		); err != nil {
+			return err
+		}
+		// Postgres rejects LOCALE combined with LC_COLLATE/LC_CTYPE in CREATE DATABASE.
+		if d.Options.Locale != "" && (d.Options.LcCollate != "" || d.Options.LcCtype != "") {
+			return fmt.Errorf("databases[%d].options: locale cannot be combined with lc_collate or lc_ctype", i)
 		}
 
 		for j, ext := range d.Extensions {
