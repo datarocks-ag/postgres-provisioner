@@ -35,6 +35,10 @@ func (c ConnConfig) DSN() string {
 		Host:   net.JoinHostPort(c.Host, c.Port),
 		Path:   "/" + c.DBName,
 	}
+	// url.URL.Path treats '/' as a segment separator, so a database name
+	// containing '/' would not be escaped. Set RawPath with a fully-escaped
+	// segment (PathEscape encodes '/' too) so the name round-trips intact.
+	u.RawPath = "/" + url.PathEscape(c.DBName)
 	q := url.Values{}
 	q.Set("sslmode", c.SSLMode)
 	u.RawQuery = q.Encode()
@@ -45,6 +49,14 @@ func (c ConnConfig) DSN() string {
 // postgres/postgresql connection URL so it can be masked before logging.
 var connURLUserinfoPattern = regexp.MustCompile(`(postgres(?:ql)?://)[^@\s"]*@`)
 
+// userinfoEscape returns s escaped the way net/url encodes a URL userinfo
+// component (as DSN() does via url.UserPassword) — e.g. a space becomes %20,
+// not '+'. This differs from url.QueryEscape and must match the DSN encoding
+// so the escaped password value can be found and masked in error strings.
+func userinfoEscape(s string) string {
+	return strings.TrimPrefix(url.UserPassword("", s).String(), ":")
+}
+
 // redactConnError returns err's message with any embedded credentials masked,
 // making it safe to log. Connection errors from the driver can echo the DSN
 // (including the plaintext password), which otherwise leaks into journals and
@@ -54,7 +66,7 @@ func redactConnError(err error, password string) string {
 	msg := connURLUserinfoPattern.ReplaceAllString(err.Error(), "${1}***REDACTED***@")
 	if password != "" {
 		msg = strings.ReplaceAll(msg, password, "***REDACTED***")
-		if esc := url.QueryEscape(password); esc != password {
+		if esc := userinfoEscape(password); esc != password {
 			msg = strings.ReplaceAll(msg, esc, "***REDACTED***")
 		}
 	}

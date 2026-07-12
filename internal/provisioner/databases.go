@@ -21,7 +21,7 @@ func (p *Provisioner) ensureDatabase(ctx context.Context, database config.Databa
 		}
 		slog.Info("Database already exists", "database", database.Name)
 		if !database.Options.IsZero() {
-			slog.Warn("encoding/locale/template cannot be altered on an existing database; leaving as-is",
+			slog.Warn("database options (encoding/locale/lc_collate/lc_ctype/template) cannot be altered on an existing database; leaving as-is",
 				"database", database.Name)
 		}
 		if database.Owner != "" {

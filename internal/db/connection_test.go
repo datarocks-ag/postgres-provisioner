@@ -40,6 +40,23 @@ func TestDSNSpecialCharacters(t *testing.T) {
 	}
 }
 
+func TestDSNDatabaseNameWithSlash(t *testing.T) {
+	cfg := ConnConfig{
+		User:     "user",
+		Password: "pass",
+		Host:     "localhost",
+		Port:     "5432",
+		DBName:   "tenant/db",
+		SSLMode:  "disable",
+	}
+
+	got := cfg.DSN()
+	want := "postgresql://user:pass@localhost:5432/tenant%2Fdb?sslmode=disable"
+	if got != want {
+		t.Errorf("DSN() = %q, want %q", got, want)
+	}
+}
+
 func TestRedactConnError(t *testing.T) {
 	const password = "p@ss:word"
 
@@ -69,6 +86,17 @@ func TestRedactConnError(t *testing.T) {
 			err:         errors.New("parse error near p%40ss%3Aword segment"),
 			password:    password,
 			wantMissing: []string{"p%40ss%3Aword"},
+			wantContain: "***REDACTED***",
+		},
+		{
+			// A space escapes to %20 under userinfo rules (as DSN() encodes it),
+			// not '+' as url.QueryEscape would produce. A truncated parse error
+			// that lost the trailing '@' won't match the URL regex, so the
+			// escaped-value fallback must use the same encoding as the DSN.
+			name:        "userinfo-escaped password with space is masked",
+			err:         errors.New(`parse "postgresql://admin:p%40ss%20w%3Ard`),
+			password:    "p@ss w:rd",
+			wantMissing: []string{"p%40ss%20w%3Ard"},
 			wantContain: "***REDACTED***",
 		},
 		{
