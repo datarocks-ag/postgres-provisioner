@@ -1,6 +1,10 @@
 package db
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestDSN(t *testing.T) {
 	cfg := ConnConfig{
@@ -30,8 +34,62 @@ func TestDSNSpecialCharacters(t *testing.T) {
 	}
 
 	got := cfg.DSN()
-	want := "postgresql://user:p@ss:word@db.example.com:5433/test-db?sslmode=require"
+	want := "postgresql://user:p%40ss%3Aword@db.example.com:5433/test-db?sslmode=require"
 	if got != want {
 		t.Errorf("DSN() = %q, want %q", got, want)
+	}
+}
+
+func TestRedactConnError(t *testing.T) {
+	const password = "p@ss:word"
+
+	tests := []struct {
+		name        string
+		err         error
+		password    string
+		wantMissing []string // substrings that must NOT appear
+		wantContain string   // substring that must appear
+	}{
+		{
+			name:        "url userinfo is masked",
+			err:         errors.New(`parse "postgresql://admin:p@ss:word@host:5432/db": invalid port`),
+			password:    password,
+			wantMissing: []string{"p@ss:word", "admin:"},
+			wantContain: "***REDACTED***",
+		},
+		{
+			name:        "raw password value is masked",
+			err:         errors.New("dial failed for user with password p@ss:word"),
+			password:    password,
+			wantMissing: []string{"p@ss:word"},
+			wantContain: "***REDACTED***",
+		},
+		{
+			name:        "percent-escaped password is masked",
+			err:         errors.New("parse error near p%40ss%3Aword segment"),
+			password:    password,
+			wantMissing: []string{"p%40ss%3Aword"},
+			wantContain: "***REDACTED***",
+		},
+		{
+			name:        "benign error is left intact",
+			err:         errors.New("connection refused"),
+			password:    password,
+			wantContain: "connection refused",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactConnError(tt.err, tt.password)
+			for _, s := range tt.wantMissing {
+				if strings.Contains(got, s) {
+					t.Errorf("redactConnError() = %q, must not contain %q", got, s)
+				}
+			}
+			if tt.wantContain != "" && !strings.Contains(got, tt.wantContain) {
+				t.Errorf("redactConnError() = %q, want to contain %q", got, tt.wantContain)
+			}
+		})
 	}
 }

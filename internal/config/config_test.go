@@ -863,6 +863,103 @@ databases:
 	}
 }
 
+func TestDatabaseOptionsParsed(t *testing.T) {
+	yaml := `
+roles:
+  - name: "synapse"
+    password: "pass"
+databases:
+  - name: "synapse"
+    owner: "synapse"
+    options:
+      encoding: "UTF8"
+      lc_collate: "C"
+      lc_ctype: "C"
+      template: "template0"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	opts := cfg.Databases[0].Options
+	if opts.Encoding != "UTF8" || opts.LcCollate != "C" || opts.LcCtype != "C" || opts.Template != "template0" {
+		t.Errorf("unexpected options: %+v", opts)
+	}
+	if opts.IsZero() {
+		t.Error("expected options to be non-zero")
+	}
+}
+
+func TestDatabaseOptionsEnvVarExpansion(t *testing.T) {
+	t.Setenv("TEST_TEMPLATE", "template0")
+	t.Setenv("TEST_COLLATE", "C")
+
+	yaml := `
+databases:
+  - name: "db1"
+    options:
+      template: "${TEST_TEMPLATE}"
+      lc_collate: "${TEST_COLLATE}"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Databases[0].Options.Template != "template0" {
+		t.Errorf("expected template 'template0', got %q", cfg.Databases[0].Options.Template)
+	}
+	if cfg.Databases[0].Options.LcCollate != "C" {
+		t.Errorf("expected lc_collate 'C', got %q", cfg.Databases[0].Options.LcCollate)
+	}
+}
+
+func TestDatabaseOptionsAbsentIsZero(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+`
+	path := writeTempConfig(t, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Databases[0].Options.IsZero() {
+		t.Error("expected options to be zero when not specified")
+	}
+}
+
+func TestValidationLocaleCombinedWithLcCollate(t *testing.T) {
+	yaml := `
+databases:
+  - name: "db1"
+    options:
+      locale: "C"
+      lc_collate: "C"
+`
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for locale combined with lc_collate")
+	}
+	if !strings.Contains(err.Error(), "databases[0].options") {
+		t.Errorf("expected error to mention 'databases[0].options', got: %v", err)
+	}
+}
+
+func TestValidationNullByteInDatabaseOption(t *testing.T) {
+	yaml := "databases:\n  - name: \"db1\"\n    options:\n      lc_collate: \"C\\x00evil\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in database option")
+	}
+	if !strings.Contains(err.Error(), "databases[0].options.lc_collate") {
+		t.Errorf("expected error to mention 'databases[0].options.lc_collate', got: %v", err)
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()

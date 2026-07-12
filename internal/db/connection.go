@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
+	"net/url"
+	"regexp"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -21,12 +25,40 @@ type ConnConfig struct {
 	SSLMode  string
 }
 
-// DSN returns the PostgreSQL connection string.
+// DSN returns the PostgreSQL connection string. User, password, and database
+// name are percent-encoded via net/url so credentials containing URL-special
+// characters (e.g. '@' or ':') don't corrupt the parsed host/port.
 func (c ConnConfig) DSN() string {
-	return fmt.Sprintf(
-		"postgresql://%s:%s@%s:%s/%s?sslmode=%s",
-		c.User, c.Password, c.Host, c.Port, c.DBName, c.SSLMode,
-	)
+	u := url.URL{
+		Scheme: "postgresql",
+		User:   url.UserPassword(c.User, c.Password),
+		Host:   net.JoinHostPort(c.Host, c.Port),
+		Path:   "/" + c.DBName,
+	}
+	q := url.Values{}
+	q.Set("sslmode", c.SSLMode)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// connURLUserinfoPattern matches the userinfo section of an embedded
+// postgres/postgresql connection URL so it can be masked before logging.
+var connURLUserinfoPattern = regexp.MustCompile(`(postgres(?:ql)?://)[^@\s"]*@`)
+
+// redactConnError returns err's message with any embedded credentials masked,
+// making it safe to log. Connection errors from the driver can echo the DSN
+// (including the plaintext password), which otherwise leaks into journals and
+// log shippers. It masks both the userinfo portion of any embedded connection
+// URL and the raw/escaped password value.
+func redactConnError(err error, password string) string {
+	msg := connURLUserinfoPattern.ReplaceAllString(err.Error(), "${1}***REDACTED***@")
+	if password != "" {
+		msg = strings.ReplaceAll(msg, password, "***REDACTED***")
+		if esc := url.QueryEscape(password); esc != password {
+			msg = strings.ReplaceAll(msg, esc, "***REDACTED***")
+		}
+	}
+	return msg
 }
 
 // Connect opens a connection to PostgreSQL with exponential backoff retry.
@@ -67,7 +99,7 @@ func Connect(ctx context.Context, cfg ConnConfig) (*sql.DB, error) {
 				"attempt", attempt+1,
 				"max_retries", maxRetries,
 				"delay", delay,
-				"error", err,
+				"error", redactConnError(err, cfg.Password),
 			)
 
 			select {

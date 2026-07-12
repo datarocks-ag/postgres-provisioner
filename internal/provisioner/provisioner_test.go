@@ -541,6 +541,112 @@ func TestCreateDatabaseNoOwner(t *testing.T) {
 	}
 }
 
+func TestCreateDatabaseWithOptions(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:  "synapse",
+		Owner: "synapse",
+		Options: config.DatabaseOptions{
+			Encoding:  "UTF8",
+			LcCollate: "C",
+			LcCtype:   "C",
+			Template:  "template0",
+		},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("synapse").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	mock.ExpectExec(`CREATE DATABASE "synapse" OWNER "synapse" TEMPLATE "template0" ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true for new database")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateDatabaseWithLocale(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:    "locdb",
+		Options: config.DatabaseOptions{Locale: "C", Template: "template0"},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("locdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	mock.ExpectExec(`CREATE DATABASE "locdb" TEMPLATE "template0" LOCALE 'C'`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	if _, err := p.ensureDatabase(context.Background(), database, "update"); err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnsureDatabaseExistingWithOptionsWarns verifies that options on an
+// already-existing database don't trigger any DDL beyond the normal owner
+// reconcile — create-time options can't be ALTERed, so we warn and continue.
+func TestEnsureDatabaseExistingWithOptionsWarns(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:    "synapse",
+		Owner:   "synapse",
+		Options: config.DatabaseOptions{LcCollate: "C", Template: "template0"},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("synapse").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	// Only the owner reconcile runs; no CREATE/ALTER for locale/template.
+	mock.ExpectExec(`ALTER DATABASE "synapse" OWNER TO "synapse"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	created, err := p.ensureDatabase(context.Background(), database, "update")
+	if err != nil {
+		t.Fatalf("ensureDatabase: %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false for existing database")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyGrantNoTarget(t *testing.T) {
 	mockDB, _, err := sqlmock.New()
 	if err != nil {

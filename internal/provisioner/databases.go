@@ -20,6 +20,10 @@ func (p *Provisioner) ensureDatabase(ctx context.Context, database config.Databa
 			return false, nil
 		}
 		slog.Info("Database already exists", "database", database.Name)
+		if !database.Options.IsZero() {
+			slog.Warn("encoding/locale/template cannot be altered on an existing database; leaving as-is",
+				"database", database.Name)
+		}
 		if database.Owner != "" {
 			return false, p.alterDatabaseOwner(ctx, database.Name, database.Owner)
 		}
@@ -42,6 +46,24 @@ func (p *Provisioner) createDatabase(ctx context.Context, database config.Databa
 	query := "CREATE DATABASE " + quoteIdentifier(database.Name)
 	if database.Owner != "" {
 		query += " OWNER " + quoteIdentifier(database.Owner)
+	}
+	// Options are create-time only; TEMPLATE is an identifier, the rest are
+	// string literals. Empty fields are omitted so Postgres applies its defaults.
+	opts := database.Options
+	if opts.Template != "" {
+		query += " TEMPLATE " + quoteIdentifier(opts.Template)
+	}
+	if opts.Encoding != "" {
+		query += " ENCODING " + quoteLiteral(opts.Encoding)
+	}
+	if opts.Locale != "" {
+		query += " LOCALE " + quoteLiteral(opts.Locale)
+	}
+	if opts.LcCollate != "" {
+		query += " LC_COLLATE " + quoteLiteral(opts.LcCollate)
+	}
+	if opts.LcCtype != "" {
+		query += " LC_CTYPE " + quoteLiteral(opts.LcCtype)
 	}
 	_, err := p.execMutation(ctx, p.adminDB, query)
 	return err
