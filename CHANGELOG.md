@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-12
+
 ### Added
 
-- **Per-database create options** — the `databases[].options` block now supports `encoding`, `locale`, `lc_collate`, `lc_ctype`, and `template`, applied at `CREATE DATABASE` time (e.g. `LC_COLLATE 'C' TEMPLATE template0`, required by collation-sensitive apps like Synapse). Options are create-time only: on an existing database they are ignored and a warning is logged, since Postgres cannot `ALTER` them. `locale` is rejected when combined with `lc_collate`/`lc_ctype`.
+- **Per-database create options** ([#32](https://github.com/datarocks-ag/postgres-provisioner/pull/32)) — the `databases[].options` block now supports `encoding`, `locale`, `lc_collate`, `lc_ctype`, and `template`, applied at `CREATE DATABASE` time (e.g. `LC_COLLATE 'C' TEMPLATE template0`, required by collation-sensitive apps like Synapse). Options are create-time only: on an existing database they are ignored and a warning is logged, since Postgres cannot `ALTER` them. `locale` is rejected when combined with `lc_collate`/`lc_ctype`.
 
 ### Fixed
 
-- **Connection DSN credentials are now percent-encoded** — `ConnConfig.DSN()` builds the connection URL via `net/url` instead of raw string concatenation. Admin/user passwords containing URL-special characters (e.g. `@` or `:`) previously corrupted the parsed host/port (`invalid port`), making the provisioner unable to connect. IPv6 hosts are also bracketed correctly.
-- **Connection errors no longer leak credentials into logs** — the connection-retry `WARN` line now passes the driver error through `redactConnError`, which masks the userinfo section of any embedded connection URL and the raw/percent-escaped password value before logging.
+- **Connection DSN credentials are now percent-encoded** ([#32](https://github.com/datarocks-ag/postgres-provisioner/pull/32)) — `ConnConfig.DSN()` builds the connection URL via `net/url` instead of raw string concatenation. Admin/user passwords containing URL-special characters (e.g. `@` or `:`) previously corrupted the parsed host/port (`invalid port`), making the provisioner unable to connect. IPv6 hosts are bracketed and the database name is escaped (including `/`) so it round-trips intact.
+- **Connection errors no longer leak credentials into logs** ([#32](https://github.com/datarocks-ag/postgres-provisioner/pull/32)) — the connection-retry `WARN` line now passes the driver error through `redactConnError`, which masks the userinfo section of any embedded connection URL and the raw/escaped password value before logging. The escaped-value match uses the same userinfo encoding as the DSN (e.g. a space as `%20`), so it also catches truncated parse errors that don't include the full URL.
 
 ## [1.1.0] - 2026-04-25
 
@@ -47,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
-[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/datarocks-ag/postgres-provisioner/releases/tag/v1.0.0
