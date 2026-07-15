@@ -61,12 +61,15 @@ func containsNullByte(s string) bool {
 
 // RoleOptions controls PostgreSQL role attributes.
 type RoleOptions struct {
-	Login           *bool `yaml:"login"`
-	Superuser       *bool `yaml:"superuser"`
-	CreateDB        *bool `yaml:"createdb"`
-	CreateRole      *bool `yaml:"createrole"`
-	BypassRLS       *bool `yaml:"bypassrls"`
-	ConnectionLimit *int  `yaml:"connection_limit"`
+	Login           *bool   `yaml:"login"`
+	Superuser       *bool   `yaml:"superuser"`
+	CreateDB        *bool   `yaml:"createdb"`
+	CreateRole      *bool   `yaml:"createrole"`
+	Inherit         *bool   `yaml:"inherit"`
+	Replication     *bool   `yaml:"replication"`
+	BypassRLS       *bool   `yaml:"bypassrls"`
+	ConnectionLimit *int    `yaml:"connection_limit"`
+	ValidUntil      *string `yaml:"valid_until"`
 }
 
 // Role defines a PostgreSQL role to provision.

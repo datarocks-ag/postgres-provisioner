@@ -408,6 +408,7 @@ func TestRoleOptionsClauses(t *testing.T) {
 	boolFalse := false
 	connLimit := 10
 	connLimitUnlimited := -1
+	validUntil := "2030-01-01"
 
 	tests := []struct {
 		name string
@@ -423,18 +424,26 @@ func TestRoleOptionsClauses(t *testing.T) {
 		{"createdb false", config.RoleOptions{CreateDB: &boolFalse}, []string{"NOCREATEDB"}},
 		{"createrole true", config.RoleOptions{CreateRole: &boolTrue}, []string{"CREATEROLE"}},
 		{"createrole false", config.RoleOptions{CreateRole: &boolFalse}, []string{"NOCREATEROLE"}},
+		{"inherit true", config.RoleOptions{Inherit: &boolTrue}, []string{"INHERIT"}},
+		{"inherit false", config.RoleOptions{Inherit: &boolFalse}, []string{"NOINHERIT"}},
+		{"replication true", config.RoleOptions{Replication: &boolTrue}, []string{"REPLICATION"}},
+		{"replication false", config.RoleOptions{Replication: &boolFalse}, []string{"NOREPLICATION"}},
 		{"bypassrls true", config.RoleOptions{BypassRLS: &boolTrue}, []string{"BYPASSRLS"}},
 		{"bypassrls false", config.RoleOptions{BypassRLS: &boolFalse}, []string{"NOBYPASSRLS"}},
 		{"connection limit", config.RoleOptions{ConnectionLimit: &connLimit}, []string{"CONNECTION LIMIT 10"}},
 		{"connection limit unlimited", config.RoleOptions{ConnectionLimit: &connLimitUnlimited}, []string{"CONNECTION LIMIT -1"}},
+		{"valid until", config.RoleOptions{ValidUntil: &validUntil}, []string{"VALID UNTIL '2030-01-01'"}},
 		{"all options", config.RoleOptions{
 			Login:           &boolTrue,
 			Superuser:       &boolFalse,
 			CreateDB:        &boolTrue,
 			CreateRole:      &boolFalse,
+			Inherit:         &boolTrue,
+			Replication:     &boolFalse,
 			BypassRLS:       &boolTrue,
 			ConnectionLimit: &connLimit,
-		}, []string{"LOGIN", "NOSUPERUSER", "CREATEDB", "NOCREATEROLE", "BYPASSRLS", "CONNECTION LIMIT 10"}},
+			ValidUntil:      &validUntil,
+		}, []string{"LOGIN", "NOSUPERUSER", "CREATEDB", "NOCREATEROLE", "INHERIT", "NOREPLICATION", "BYPASSRLS", "CONNECTION LIMIT 10", "VALID UNTIL '2030-01-01'"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

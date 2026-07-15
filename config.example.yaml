@@ -16,8 +16,11 @@ roles:
       superuser: false
       createdb: false
       createrole: false
+      inherit: true                    # inherit privileges of granted roles
+      replication: false               # allow logical/physical replication
       bypassrls: false                 # bypass row-level security policies
       connection_limit: -1             # unlimited
+      valid_until: "2030-01-01"        # password expiry (omit for no expiry)
 
   - name: "readonly_user"
     password: "${READONLY_DB_PASSWORD}"
