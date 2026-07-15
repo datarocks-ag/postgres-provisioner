@@ -240,10 +240,15 @@ func validate(cfg *Config) error {
 		if r.Name == "" {
 			return fmt.Errorf("roles[%d]: name is required", i)
 		}
-		if err := checkNullBytes(
-			struct{ path, value string }{fmt.Sprintf("roles[%d].name", i), r.Name},
-			struct{ path, value string }{fmt.Sprintf("roles[%d].password", i), r.Password},
-		); err != nil {
+		nullByteFields := []struct{ path, value string }{
+			{fmt.Sprintf("roles[%d].name", i), r.Name},
+			{fmt.Sprintf("roles[%d].password", i), r.Password},
+		}
+		if r.Options.ValidUntil != nil {
+			nullByteFields = append(nullByteFields,
+				struct{ path, value string }{fmt.Sprintf("roles[%d].options.valid_until", i), *r.Options.ValidUntil})
+		}
+		if err := checkNullBytes(nullByteFields...); err != nil {
 			return err
 		}
 		if r.Options.ConnectionLimit != nil && *r.Options.ConnectionLimit < -1 {
