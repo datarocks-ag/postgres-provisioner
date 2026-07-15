@@ -16,6 +16,7 @@ roles:
       superuser: false
       createdb: false
       createrole: false
+      bypassrls: false                 # bypass row-level security policies
       connection_limit: -1             # unlimited
 
   - name: "readonly_user"

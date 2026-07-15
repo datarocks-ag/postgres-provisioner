@@ -106,6 +106,14 @@ func roleOptionsClauses(opts config.RoleOptions) []string {
 		}
 	}
 
+	if opts.BypassRLS != nil {
+		if *opts.BypassRLS {
+			clauses = append(clauses, "BYPASSRLS")
+		} else {
+			clauses = append(clauses, "NOBYPASSRLS")
+		}
+	}
+
 	if opts.ConnectionLimit != nil {
 		clauses = append(clauses, fmt.Sprintf("CONNECTION LIMIT %d", *opts.ConnectionLimit))
 	}

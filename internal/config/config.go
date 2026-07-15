@@ -65,6 +65,7 @@ type RoleOptions struct {
 	Superuser       *bool `yaml:"superuser"`
 	CreateDB        *bool `yaml:"createdb"`
 	CreateRole      *bool `yaml:"createrole"`
+	BypassRLS       *bool `yaml:"bypassrls"`
 	ConnectionLimit *int  `yaml:"connection_limit"`
 }
 

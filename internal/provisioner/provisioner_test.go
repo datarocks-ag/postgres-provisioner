@@ -423,6 +423,8 @@ func TestRoleOptionsClauses(t *testing.T) {
 		{"createdb false", config.RoleOptions{CreateDB: &boolFalse}, []string{"NOCREATEDB"}},
 		{"createrole true", config.RoleOptions{CreateRole: &boolTrue}, []string{"CREATEROLE"}},
 		{"createrole false", config.RoleOptions{CreateRole: &boolFalse}, []string{"NOCREATEROLE"}},
+		{"bypassrls true", config.RoleOptions{BypassRLS: &boolTrue}, []string{"BYPASSRLS"}},
+		{"bypassrls false", config.RoleOptions{BypassRLS: &boolFalse}, []string{"NOBYPASSRLS"}},
 		{"connection limit", config.RoleOptions{ConnectionLimit: &connLimit}, []string{"CONNECTION LIMIT 10"}},
 		{"connection limit unlimited", config.RoleOptions{ConnectionLimit: &connLimitUnlimited}, []string{"CONNECTION LIMIT -1"}},
 		{"all options", config.RoleOptions{
@@ -430,8 +432,9 @@ func TestRoleOptionsClauses(t *testing.T) {
 			Superuser:       &boolFalse,
 			CreateDB:        &boolTrue,
 			CreateRole:      &boolFalse,
+			BypassRLS:       &boolTrue,
 			ConnectionLimit: &connLimit,
-		}, []string{"LOGIN", "NOSUPERUSER", "CREATEDB", "NOCREATEROLE", "CONNECTION LIMIT 10"}},
+		}, []string{"LOGIN", "NOSUPERUSER", "CREATEDB", "NOCREATEROLE", "BYPASSRLS", "CONNECTION LIMIT 10"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
