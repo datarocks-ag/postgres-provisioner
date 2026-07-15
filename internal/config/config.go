@@ -61,11 +61,15 @@ func containsNullByte(s string) bool {
 
 // RoleOptions controls PostgreSQL role attributes.
 type RoleOptions struct {
-	Login           *bool `yaml:"login"`
-	Superuser       *bool `yaml:"superuser"`
-	CreateDB        *bool `yaml:"createdb"`
-	CreateRole      *bool `yaml:"createrole"`
-	ConnectionLimit *int  `yaml:"connection_limit"`
+	Login           *bool   `yaml:"login"`
+	Superuser       *bool   `yaml:"superuser"`
+	CreateDB        *bool   `yaml:"createdb"`
+	CreateRole      *bool   `yaml:"createrole"`
+	Inherit         *bool   `yaml:"inherit"`
+	Replication     *bool   `yaml:"replication"`
+	BypassRLS       *bool   `yaml:"bypassrls"`
+	ConnectionLimit *int    `yaml:"connection_limit"`
+	ValidUntil      *string `yaml:"valid_until"`
 }
 
 // Role defines a PostgreSQL role to provision.
@@ -236,10 +240,15 @@ func validate(cfg *Config) error {
 		if r.Name == "" {
 			return fmt.Errorf("roles[%d]: name is required", i)
 		}
-		if err := checkNullBytes(
-			struct{ path, value string }{fmt.Sprintf("roles[%d].name", i), r.Name},
-			struct{ path, value string }{fmt.Sprintf("roles[%d].password", i), r.Password},
-		); err != nil {
+		nullByteFields := []struct{ path, value string }{
+			{fmt.Sprintf("roles[%d].name", i), r.Name},
+			{fmt.Sprintf("roles[%d].password", i), r.Password},
+		}
+		if r.Options.ValidUntil != nil {
+			nullByteFields = append(nullByteFields,
+				struct{ path, value string }{fmt.Sprintf("roles[%d].options.valid_until", i), *r.Options.ValidUntil})
+		}
+		if err := checkNullBytes(nullByteFields...); err != nil {
 			return err
 		}
 		if r.Options.ConnectionLimit != nil && *r.Options.ConnectionLimit < -1 {

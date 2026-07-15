@@ -106,8 +106,36 @@ func roleOptionsClauses(opts config.RoleOptions) []string {
 		}
 	}
 
+	if opts.Inherit != nil {
+		if *opts.Inherit {
+			clauses = append(clauses, "INHERIT")
+		} else {
+			clauses = append(clauses, "NOINHERIT")
+		}
+	}
+
+	if opts.Replication != nil {
+		if *opts.Replication {
+			clauses = append(clauses, "REPLICATION")
+		} else {
+			clauses = append(clauses, "NOREPLICATION")
+		}
+	}
+
+	if opts.BypassRLS != nil {
+		if *opts.BypassRLS {
+			clauses = append(clauses, "BYPASSRLS")
+		} else {
+			clauses = append(clauses, "NOBYPASSRLS")
+		}
+	}
+
 	if opts.ConnectionLimit != nil {
 		clauses = append(clauses, fmt.Sprintf("CONNECTION LIMIT %d", *opts.ConnectionLimit))
+	}
+
+	if opts.ValidUntil != nil {
+		clauses = append(clauses, "VALID UNTIL "+quoteLiteral(*opts.ValidUntil))
 	}
 
 	return clauses

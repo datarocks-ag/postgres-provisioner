@@ -648,6 +648,15 @@ func TestValidationNullByteInPassword(t *testing.T) {
 	}
 }
 
+func TestValidationNullByteInValidUntil(t *testing.T) {
+	yaml := "roles:\n  - name: \"user1\"\n    options:\n      valid_until: \"2030\\x0001-01\"\n"
+	path := writeTempConfig(t, yaml)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for null byte in valid_until")
+	}
+}
+
 func TestValidationNullByteInDatabaseName(t *testing.T) {
 	yaml := "databases:\n  - name: \"db\\x00evil\"\n"
 	path := writeTempConfig(t, yaml)

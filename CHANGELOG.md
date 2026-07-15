@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bypassrls` role option** — `roles[].options.bypassrls` now emits `BYPASSRLS`/`NOBYPASSRLS` on `CREATE ROLE`/`ALTER ROLE`, allowing a role to bypass row-level security policies.
+- **`inherit`, `replication`, and `valid_until` role options** — `roles[].options` now also supports `inherit` (`INHERIT`/`NOINHERIT`), `replication` (`REPLICATION`/`NOREPLICATION`), and `valid_until` (`VALID UNTIL '<timestamp>'`, password expiry), applied on `CREATE ROLE`/`ALTER ROLE`.
+
 ## [1.2.0] - 2026-07-12
 
 ### Added
