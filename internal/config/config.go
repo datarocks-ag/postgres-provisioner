@@ -378,6 +378,62 @@ func validateMemberOfCycles(roles []Role) error {
 	return nil
 }
 
+// IsPublic reports whether role is the PUBLIC pseudo-role (case-insensitive).
+// PostgreSQL reserves the name, so no real role can be called "public".
+func IsPublic(role string) bool {
+	return strings.EqualFold(role, "PUBLIC")
+}
+
+// normalizePrivilege returns the canonical upper-case form of a privilege keyword.
+func normalizePrivilege(privilege string) string {
+	return strings.ToUpper(strings.TrimSpace(privilege))
+}
+
+// validateGrant checks a single grant entry. path is the entry's config path, e.g.
+// "databases[0].grants[1]".
+func validateGrant(path string, g Grant, roleNames map[string]bool) error {
+	if g.Role == "" {
+		return fmt.Errorf("%s: role is required", path)
+	}
+	if err := checkNullBytes(
+		struct{ path, value string }{path + ".role", g.Role},
+		struct{ path, value string }{path + ".on_schema", g.OnSchema},
+		struct{ path, value string }{path + ".on_tables_in_schema", g.OnTablesInSchema},
+		struct{ path, value string }{path + ".on_sequences_in_schema", g.OnSequencesInSchema},
+		struct{ path, value string }{path + ".on_functions_in_schema", g.OnFunctionsInSchema},
+	); err != nil {
+		return err
+	}
+	if !roleNames[g.Role] {
+		return fmt.Errorf("%s.role: role %q is not declared in roles", path, g.Role)
+	}
+	if len(g.Privileges) == 0 {
+		return fmt.Errorf("%s: privileges is required", path)
+	}
+	targets := g.Targets()
+	if len(targets) != 1 {
+		return fmt.Errorf("%s: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, or on_functions_in_schema is required", path)
+	}
+	return validatePrivileges(path, g.Privileges, targets[0])
+}
+
+// validatePrivileges checks privileges against the injection allowlist and the set
+// PostgreSQL accepts for target.
+func validatePrivileges(path string, privileges []string, target GrantTarget) error {
+	allowed := privilegesByTarget[target]
+	for k, priv := range privileges {
+		normalized := normalizePrivilege(priv)
+		if !validPrivileges[normalized] {
+			return fmt.Errorf("%s.privileges[%d]: invalid privilege %q", path, k, priv)
+		}
+		if !allowed[normalized] {
+			return fmt.Errorf("%s.privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
+				path, k, priv, target, strings.Join(sortedPrivileges(allowed), ", "))
+		}
+	}
+	return nil
+}
+
 // validate checks the config for required fields and consistency.
 func validate(cfg *Config) error {
 	if err := validateStrategy("strategy", cfg.Strategy); err != nil {
@@ -488,38 +544,8 @@ func validate(cfg *Config) error {
 		}
 
 		for j, g := range d.Grants {
-			if g.Role == "" {
-				return fmt.Errorf("databases[%d].grants[%d]: role is required", i, j)
-			}
-			if err := checkNullBytes(
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].role", i, j), g.Role},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_schema", i, j), g.OnSchema},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_tables_in_schema", i, j), g.OnTablesInSchema},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_sequences_in_schema", i, j), g.OnSequencesInSchema},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_functions_in_schema", i, j), g.OnFunctionsInSchema},
-			); err != nil {
+			if err := validateGrant(fmt.Sprintf("databases[%d].grants[%d]", i, j), g, roleNames); err != nil {
 				return err
-			}
-			if !roleNames[g.Role] {
-				return fmt.Errorf("databases[%d].grants[%d].role: role %q is not declared in roles", i, j, g.Role)
-			}
-			if len(g.Privileges) == 0 {
-				return fmt.Errorf("databases[%d].grants[%d]: privileges is required", i, j)
-			}
-			targets := g.Targets()
-			if len(targets) != 1 {
-				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, or on_functions_in_schema is required", i, j)
-			}
-			allowed := privilegesByTarget[targets[0]]
-			for k, priv := range g.Privileges {
-				normalized := strings.ToUpper(strings.TrimSpace(priv))
-				if !validPrivileges[normalized] {
-					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: invalid privilege %q", i, j, k, priv)
-				}
-				if !allowed[normalized] {
-					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
-						i, j, k, priv, targets[0], strings.Join(sortedPrivileges(allowed), ", "))
-				}
 			}
 		}
 

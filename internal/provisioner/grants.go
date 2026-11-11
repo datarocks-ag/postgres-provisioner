@@ -12,7 +12,7 @@ import (
 
 func (p *Provisioner) applyGrant(ctx context.Context, dbConn *sql.DB, database config.Database, grant config.Grant) error {
 	privs := strings.Join(grant.Privileges, ", ")
-	role := quoteIdentifier(grant.Role)
+	role := granteeSQL(grant.Role)
 
 	switch {
 	case grant.OnDatabase:
@@ -31,6 +31,15 @@ func (p *Provisioner) applyGrant(ctx context.Context, dbConn *sql.DB, database c
 	default:
 		return fmt.Errorf("no grant target specified")
 	}
+}
+
+// granteeSQL renders a grantee for GRANT/REVOKE. PUBLIC (any case) is the keyword for
+// all roles and must stay unquoted: "PUBLIC" in quotes would name a role called PUBLIC.
+func granteeSQL(role string) string {
+	if config.IsPublic(role) {
+		return "PUBLIC"
+	}
+	return quoteIdentifier(role)
 }
 
 func (p *Provisioner) grantOnDatabase(ctx context.Context, dbConn *sql.DB, dbName, privs, role string) error {
