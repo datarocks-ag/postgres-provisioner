@@ -30,6 +30,7 @@ services:
       PGHELPER_CONFIG_PATH: /config.yaml
       LOG_LEVEL: info
       APP_DB_PASSWORD: appsecret
+      READONLY_DB_PASSWORD: readonlysecret
       POSTGRES_EXPORTER_PASSWORD: exportersecret
     volumes:
       - ./config.example.yaml:/config.yaml:ro
