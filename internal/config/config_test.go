@@ -80,12 +80,20 @@ databases:
 	}
 }
 
-func TestUnsetEnvVarPreserved(t *testing.T) {
-	os.Unsetenv("TOTALLY_UNSET_VAR")
-
-	result := expandEnvVars("${TOTALLY_UNSET_VAR}")
-	if result != "${TOTALLY_UNSET_VAR}" {
-		t.Errorf("expected unresolved var to be preserved, got %s", result)
+func TestUnsetEnvVarFails(t *testing.T) {
+	path := writeTempConfig(t, `
+roles:
+  - name: "app_user"
+    password: "${TOTALLY_UNSET_VAR}"
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unset environment variable")
+	}
+	for _, want := range []string{"roles[0].password", "TOTALLY_UNSET_VAR", "TOTALLY_UNSET_VAR_FILE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected error to mention %q, got: %v", want, err)
+		}
 	}
 }
 
@@ -726,23 +734,6 @@ func TestContainsNullByte(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("containsNullByte(%q) = %v, want %v", tt.input, got, tt.want)
 		}
-	}
-}
-
-func TestExpandEnvVarsMultiple(t *testing.T) {
-	t.Setenv("VAR_A", "hello")
-	t.Setenv("VAR_B", "world")
-
-	result := expandEnvVars("${VAR_A}_${VAR_B}")
-	if result != "hello_world" {
-		t.Errorf("expected 'hello_world', got %q", result)
-	}
-}
-
-func TestExpandEnvVarsNoVars(t *testing.T) {
-	result := expandEnvVars("no vars here")
-	if result != "no vars here" {
-		t.Errorf("expected 'no vars here', got %q", result)
 	}
 }
 

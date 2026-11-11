@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -42,4 +44,45 @@ func TestSetupLogging(t *testing.T) {
 			setupLogging()
 		})
 	}
+}
+
+func TestResolveEnv(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "pw")
+	if err := os.WriteFile(secretPath, []byte("file-pass\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("plain variable", func(t *testing.T) {
+		t.Setenv("RESOLVE_PLAIN", "value")
+		got, err := resolveEnv("RESOLVE_PLAIN")
+		if err != nil || got != "value" {
+			t.Errorf("got (%q, %v), want (\"value\", nil)", got, err)
+		}
+	})
+	t.Run("file variable", func(t *testing.T) {
+		t.Setenv("RESOLVE_FILE_FILE", secretPath)
+		got, err := resolveEnv("RESOLVE_FILE")
+		if err != nil || got != "file-pass" {
+			t.Errorf("got (%q, %v), want (\"file-pass\", nil)", got, err)
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		got, err := resolveEnv("RESOLVE_UNSET_12345")
+		if err != nil || got != "" {
+			t.Errorf("got (%q, %v), want (\"\", nil)", got, err)
+		}
+	})
+	t.Run("both set", func(t *testing.T) {
+		t.Setenv("RESOLVE_BOTH", "value")
+		t.Setenv("RESOLVE_BOTH_FILE", secretPath)
+		if _, err := resolveEnv("RESOLVE_BOTH"); err == nil {
+			t.Error("expected error when both variable and file are set")
+		}
+	})
+	t.Run("envOrDefault uses file", func(t *testing.T) {
+		t.Setenv("RESOLVE_DEFAULT_FILE", secretPath)
+		if got := envOrDefault("RESOLVE_DEFAULT", "fallback"); got != "file-pass" {
+			t.Errorf("envOrDefault = %q, want \"file-pass\"", got)
+		}
+	})
 }

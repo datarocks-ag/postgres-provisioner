@@ -863,3 +863,47 @@ roles:
 		t.Error("expected postgres_exporter to be unable to create tables in the postgres database")
 	}
 }
+
+// TestIntegrationRolePasswordFromSecretFile provisions a role whose password comes from
+// a Docker/Kubernetes-style secret file (APP_PW_FILE) and logs in with it.
+func TestIntegrationRolePasswordFromSecretFile(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	const password = "pw-from-secret-file"
+	secretPath := filepath.Join(t.TempDir(), "app_pw")
+	if err := os.WriteFile(secretPath, []byte(password+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_PW_FILE", secretPath)
+
+	cfgPath := writeTestConfig(t, `
+roles:
+  - name: "file_secret_user"
+    password: "${APP_PW}"
+    options:
+      login: true
+`)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	userCfg := connCfg
+	userCfg.User = "file_secret_user"
+	userCfg.Password = password
+	userDB, err := db.Connect(ctx, userCfg)
+	if err != nil {
+		t.Fatalf("connect with password from secret file: %v", err)
+	}
+	defer userDB.Close()
+
+	if err := userDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping as file_secret_user: %v", err)
+	}
+}

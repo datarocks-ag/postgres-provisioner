@@ -112,17 +112,33 @@ func setupLogging() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
+// resolveEnv returns the value of key, falling back to the file named by key_FILE.
+// An empty value is treated as unset and returned as "".
+func resolveEnv(key string) (string, error) {
+	val, _, err := config.LookupEnvOrFile(key)
+	return val, err
+}
+
 func requireEnv(key string) string {
-	val := os.Getenv(key)
+	val, err := resolveEnv(key)
+	if err != nil {
+		slog.Error("Invalid environment variable", "variable", key, "error", err)
+		os.Exit(1)
+	}
 	if val == "" {
-		slog.Error("Required environment variable not set", "variable", key)
+		slog.Error("Required environment variable not set", "variable", key, "file_variable", key+"_FILE")
 		os.Exit(1)
 	}
 	return val
 }
 
 func envOrDefault(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
+	val, err := resolveEnv(key)
+	if err != nil {
+		slog.Error("Invalid environment variable", "variable", key, "error", err)
+		os.Exit(1)
+	}
+	if val != "" {
 		return val
 	}
 	return defaultVal

@@ -126,8 +126,8 @@ on each database it should scrape.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `POSTGRES_USER` | yes | - | Admin user |
-| `POSTGRES_PASSWORD` | yes | - | Admin password |
+| `POSTGRES_USER` | yes | - | Admin user (or `POSTGRES_USER_FILE`) |
+| `POSTGRES_PASSWORD` | yes | - | Admin password (or `POSTGRES_PASSWORD_FILE`) |
 | `POSTGRES_HOST` | no | `localhost` | PostgreSQL host |
 | `POSTGRES_PORT` | no | `5432` | PostgreSQL port |
 | `POSTGRES_DB` | no | `postgres` | Admin database |
@@ -136,6 +136,9 @@ on each database it should scrape.
 | `MIGRATIONS_ENABLED` | no | `true` | Set to `false` to skip all migrations at runtime |
 | `DRY_RUN` | no | `false` | Set to `true` to log every mutation as a preview without applying it |
 | `LOG_LEVEL` | no | `info` | Log level (debug/info/warn/error) |
+
+Every variable above can alternatively be read from a file by setting `<NAME>_FILE` to its
+path (trailing newlines trimmed). Setting both `<NAME>` and `<NAME>_FILE` is an error.
 
 ## Strategy
 
@@ -159,10 +162,38 @@ roles:
 
 ## Environment Variable Expansion
 
-String values support `${VAR}` syntax. If the variable is set in the environment, it is replaced; if unset, the placeholder is preserved as-is (useful for detecting misconfigurations).
+String values support `${VAR}` references, resolved when the config is loaded:
+
+| Syntax | Behavior |
+|---|---|
+| `${VAR}` | Value of `VAR`; falls back to the contents of the file named by `VAR_FILE`. **Fails if neither is set.** |
+| `${VAR:-default}` | Like `${VAR}`, but uses `default` when neither `VAR` nor `VAR_FILE` is set. |
+| `${VAR:-}` | Optional value: empty string when unset. |
 
 ```yaml
-password: "${APP_DB_PASSWORD}"    # replaced with env var value at load time
+password: "${APP_DB_PASSWORD}"          # from APP_DB_PASSWORD or the file in APP_DB_PASSWORD_FILE
+name: "${APP_DB_NAME:-myapp}"           # with a default
+```
+
+Rules:
+
+- **Unresolved references fail loading.** Every missing variable is reported in one error,
+  with its config path (e.g. `roles[0].password: environment variable APP_DB_PASSWORD is not set`).
+- **`*_FILE` secrets** (Docker secrets / Kubernetes secret volumes): the file content is used
+  with trailing newlines trimmed (max 64 KiB). Setting both `VAR` and `VAR_FILE` is an error.
+- **Passwords must not resolve to empty.** A `password` containing a reference that expands
+  to `""` fails, since an empty password would silently provision the role without one.
+- Error messages never contain resolved values or file contents.
+- Default values cannot contain `}`.
+
+```yaml
+# docker-compose.yaml
+services:
+  postgres-provisioner:
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_admin_password
+      APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
+    secrets: [pg_admin_password, app_db_password]
 ```
 
 ## Provisioning Order

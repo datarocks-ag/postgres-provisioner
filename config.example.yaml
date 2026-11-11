@@ -1,7 +1,9 @@
 # postgres-provisioner configuration example
 #
 # Environment variable interpolation: use ${VAR_NAME} syntax.
-# Unresolved variables are left as-is (useful for detecting misconfig).
+#   ${VAR}          value of VAR, or contents of the file in VAR_FILE; fails if unset
+#   ${VAR:-default} falls back to "default" when unset
+#   ${VAR:-}        optional, empty when unset
 #
 # Strategy: "update" (default) creates or updates resources.
 #           "create" only creates if missing, skips existing.
