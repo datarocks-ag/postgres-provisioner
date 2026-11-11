@@ -20,15 +20,8 @@ func (p *Provisioner) applyGrant(ctx context.Context, dbConn *sql.DB, database c
 	case grant.OnSchema != "":
 		return p.grantOnSchema(ctx, dbConn, grant.OnSchema, privs, role)
 	case grant.OnTablesInSchema != "":
-		// Find the schema owner to set default privileges for tables they create
-		schemaOwner := database.Owner
-		for _, s := range database.Schemas {
-			if s.Name == grant.OnTablesInSchema && s.Owner != "" {
-				schemaOwner = s.Owner
-				break
-			}
-		}
-		return p.grantOnTablesInSchema(ctx, dbConn, grant.OnTablesInSchema, privs, role, schemaOwner)
+		schema := grant.OnTablesInSchema
+		return p.grantOnObjectsInSchema(ctx, dbConn, tablesKind, schema, privs, role, schemaOwnerFor(database, schema))
 	default:
 		return fmt.Errorf("no grant target specified")
 	}
@@ -48,18 +41,43 @@ func (p *Provisioner) grantOnSchema(ctx context.Context, dbConn *sql.DB, schema,
 	return err
 }
 
-// grantOnTablesInSchema applies three coupled statements (GRANT on existing tables and
+// schemaObjectKind describes a class of schema objects that supports both
+// "GRANT ... ON ALL <kind> IN SCHEMA" and "ALTER DEFAULT PRIVILEGES ... ON <kind>".
+type schemaObjectKind struct {
+	label          string // human-readable, used in logs and errors
+	allKeyword     string // keyword in GRANT ... ON ALL <allKeyword> IN SCHEMA
+	defaultKeyword string // keyword in ALTER DEFAULT PRIVILEGES ... ON <defaultKeyword>
+}
+
+var tablesKind = schemaObjectKind{label: "tables", allKeyword: "TABLES", defaultKeyword: "TABLES"}
+
+// schemaOwnerFor returns the configured owner of schema, falling back to the database owner.
+func schemaOwnerFor(database config.Database, schema string) string {
+	for _, s := range database.Schemas {
+		if s.Name == schema && s.Owner != "" {
+			return s.Owner
+		}
+	}
+	return database.Owner
+}
+
+// grantOnObjectsInSchema applies three coupled statements (GRANT on existing objects and
 // ALTER DEFAULT PRIVILEGES for both the current user and the schema owner) inside a
 // single transaction so that a partial failure cannot leave the schema with grants on
-// existing tables but no default privileges for newly created ones.
+// existing objects but no default privileges for newly created ones.
 //
 // In dry-run mode the transaction is skipped entirely; each statement is logged as a
 // preview with a note that they would run in a single transaction.
-func (p *Provisioner) grantOnTablesInSchema(ctx context.Context, dbConn *sql.DB, schema, privs, role, schemaOwner string) error {
-	slog.Info("Granting on tables in schema", "schema", schema, "privileges", privs, "schema_owner", schemaOwner)
+func (p *Provisioner) grantOnObjectsInSchema(ctx context.Context, dbConn *sql.DB, kind schemaObjectKind, schema, privs, role, schemaOwner string) error {
+	slog.Info("Granting on "+kind.label+" in schema", "schema", schema, "privileges", privs, "schema_owner", schemaOwner)
+
+	statements := objectsInSchemaStatements(kind, schema, privs, role, schemaOwner)
 
 	if p.opts.DryRun {
-		return p.dryRunGrantOnTablesInSchema(schema, privs, role, schemaOwner)
+		for _, stmt := range statements {
+			slog.Info("[DRY RUN] would execute in transaction", "sql", redactSecrets(stmt.sql))
+		}
+		return nil
 	}
 
 	tx, err := dbConn.BeginTx(ctx, nil)
@@ -68,29 +86,9 @@ func (p *Provisioner) grantOnTablesInSchema(ctx context.Context, dbConn *sql.DB,
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	query := fmt.Sprintf(
-		"GRANT %s ON ALL TABLES IN SCHEMA %s TO %s",
-		privs, quoteIdentifier(schema), role,
-	)
-	if _, err := tx.ExecContext(ctx, query); err != nil {
-		return fmt.Errorf("grant on existing tables: %w", err)
-	}
-
-	query = fmt.Sprintf(
-		"ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT %s ON TABLES TO %s",
-		quoteIdentifier(schema), privs, role,
-	)
-	if _, err := tx.ExecContext(ctx, query); err != nil {
-		return fmt.Errorf("alter default privileges: %w", err)
-	}
-
-	if schemaOwner != "" {
-		query = fmt.Sprintf(
-			"ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON TABLES TO %s",
-			quoteIdentifier(schemaOwner), quoteIdentifier(schema), privs, role,
-		)
-		if _, err := tx.ExecContext(ctx, query); err != nil {
-			return fmt.Errorf("alter default privileges for schema owner: %w", err)
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt.sql); err != nil {
+			return fmt.Errorf("%s: %w", stmt.description, err)
 		}
 	}
 
@@ -100,17 +98,30 @@ func (p *Provisioner) grantOnTablesInSchema(ctx context.Context, dbConn *sql.DB,
 	return nil
 }
 
-func (p *Provisioner) dryRunGrantOnTablesInSchema(schema, privs, role, schemaOwner string) error {
-	logTx := func(query string) {
-		slog.Info("[DRY RUN] would execute in transaction", "sql", redactSecrets(query))
+type describedStatement struct {
+	sql         string
+	description string
+}
+
+func objectsInSchemaStatements(kind schemaObjectKind, schema, privs, role, schemaOwner string) []describedStatement {
+	statements := []describedStatement{
+		{
+			sql: fmt.Sprintf("GRANT %s ON ALL %s IN SCHEMA %s TO %s",
+				privs, kind.allKeyword, quoteIdentifier(schema), role),
+			description: "grant on existing " + kind.label,
+		},
+		{
+			sql: fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT %s ON %s TO %s",
+				quoteIdentifier(schema), privs, kind.defaultKeyword, role),
+			description: "alter default privileges",
+		},
 	}
-	logTx(fmt.Sprintf("GRANT %s ON ALL TABLES IN SCHEMA %s TO %s",
-		privs, quoteIdentifier(schema), role))
-	logTx(fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT %s ON TABLES TO %s",
-		quoteIdentifier(schema), privs, role))
 	if schemaOwner != "" {
-		logTx(fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON TABLES TO %s",
-			quoteIdentifier(schemaOwner), quoteIdentifier(schema), privs, role))
+		statements = append(statements, describedStatement{
+			sql: fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON %s TO %s",
+				quoteIdentifier(schemaOwner), quoteIdentifier(schema), privs, kind.defaultKeyword, role),
+			description: "alter default privileges for schema owner",
+		})
 	}
-	return nil
+	return statements
 }
