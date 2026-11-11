@@ -15,6 +15,8 @@ func (p *Provisioner) applyGrant(ctx context.Context, dbConn *sql.DB, database c
 	role := granteeSQL(grant.Role)
 
 	switch {
+	case grant.IsObjectGrant():
+		return p.grantOnTables(ctx, dbConn, grant)
 	case grant.OnDatabase:
 		return p.grantOnDatabase(ctx, dbConn, database.Name, privs, role)
 	case grant.OnSchema != "":

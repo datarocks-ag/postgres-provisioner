@@ -209,6 +209,7 @@ services:
 6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
 7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
 8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
+9. **Object grants** — `on_tables` grants (per-database), after migrations so they can target tables migrations create.
 
 ## Grant Types
 
@@ -221,6 +222,7 @@ Each grant sets exactly one target. Privileges are validated per target when the
 | `on_tables_in_schema: "name"` | all tables in the schema | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `ALL` |
 | `on_sequences_in_schema: "name"` | all sequences in the schema | `USAGE`, `SELECT`, `UPDATE`, `ALL` |
 | `on_functions_in_schema: "name"` | all functions and procedures in the schema | `EXECUTE`, `ALL` |
+| `on_tables: ["schema.table", ...]` | specific tables (optionally `columns`) | table privileges; with `columns`: `SELECT`, `INSERT`, `UPDATE`, `REFERENCES`, `ALL` |
 
 The `*_in_schema` targets grant on all existing objects and set `ALTER DEFAULT PRIVILEGES`
 for objects created later, both by the provisioning user (e.g. via migrations) and by the
@@ -238,6 +240,21 @@ grants:
   - { role: app, privileges: [SELECT, INSERT, UPDATE, DELETE], on_tables_in_schema: app }
   - { role: app, privileges: [USAGE, SELECT], on_sequences_in_schema: app }
 ```
+
+**Specific tables and columns:**
+
+```yaml
+grants:
+  - role: reporting
+    privileges: [SELECT]
+    on_tables: ["app.users", "app.orders"]   # schema-qualified, used verbatim (case-sensitive)
+    columns: ["id", "email"]                 # optional: GRANT SELECT ("id", "email") ON TABLE ...
+```
+
+`on_tables` grants run **after migrations**, so they can target tables created by them in
+the same run. A table that still doesn't exist by then fails provisioning with the missing
+table names (in dry-run it's only logged, since migrations aren't applied). Unlike the
+`*_in_schema` targets they don't set default privileges.
 
 **Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
 matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.

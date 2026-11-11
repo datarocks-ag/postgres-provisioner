@@ -1449,3 +1449,88 @@ databases:
 		t.Error("expected strategy=create to skip revokes on the existing database")
 	}
 }
+
+// TestIntegrationTableAndColumnGrantsAfterMigrations provisions a fresh database whose
+// tables are created by a migration in the same run, then grants on specific tables and
+// columns, including case-sensitive quoted identifiers.
+func TestIntegrationTableAndColumnGrantsAfterMigrations(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__tables.sql", `
+CREATE TABLE app.users (id int, email text, secret text);
+INSERT INTO app.users VALUES (1, 'a@example.com', 's3cret');
+CREATE TABLE "App"."Orders" (id int);
+`)
+
+	cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+roles:
+  - name: "reporting"
+    password: "reportingpass"
+    options: { login: true }
+
+databases:
+  - name: "objgrants"
+    schemas:
+      - name: "app"
+      - name: "App"
+    grants:
+      - { role: "reporting", privileges: ["SELECT"], on_tables: ["app.users"], columns: ["id", "email"] }
+      - { role: "reporting", privileges: ["SELECT"], on_tables: ["App.Orders"] }
+      - { role: "reporting", privileges: ["USAGE"], on_schema: "app" }
+      - { role: "reporting", privileges: ["USAGE"], on_schema: "App" }
+    migrations:
+      directory: %q
+`, migrationsDir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for run := 1; run <= 2; run++ {
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run %d failed: %v", run, err)
+		}
+	}
+
+	reportingDB := connectAs(t, connCfg, "reporting", "reportingpass", "objgrants")
+	var email string
+	if err := reportingDB.QueryRowContext(ctx, `SELECT email FROM app.users WHERE id = 1`).Scan(&email); err != nil {
+		t.Errorf("SELECT on granted columns: %v", err)
+	}
+	var secret string
+	err = reportingDB.QueryRowContext(ctx, `SELECT secret FROM app.users WHERE id = 1`).Scan(&secret)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("expected permission denied on ungranted column, got: %v", err)
+	}
+	var count int
+	if err := reportingDB.QueryRowContext(ctx, `SELECT count(*) FROM "App"."Orders"`).Scan(&count); err != nil {
+		t.Errorf("SELECT on quoted-identifier table: %v", err)
+	}
+}
+
+func TestIntegrationTableGrantMissingTableFails(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "reporting"
+
+databases:
+  - name: "objgrantsmissing"
+    schemas:
+      - name: "app"
+    grants:
+      - { role: "reporting", privileges: ["SELECT"], on_tables: ["app.ghost"] }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost") {
+		t.Fatalf("expected missing table error, got: %v", err)
+	}
+}

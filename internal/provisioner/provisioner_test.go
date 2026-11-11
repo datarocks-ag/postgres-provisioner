@@ -2294,3 +2294,139 @@ func TestDryRunRevokeOnNewDatabase(t *testing.T) {
 		t.Errorf("expected previewed SQL %q, got %q", want, *captured)
 	}
 }
+
+const toRegclassQuery = `SELECT to_regclass\(\$1\)::text`
+
+func TestGrantOnTablesWithColumns(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"App"."Orders"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(`"App"."Orders"`))
+	mock.ExpectExec(`^GRANT SELECT \("id", "email"\), UPDATE \("id", "email"\) ON TABLE "app"\."users", "App"\."Orders" TO "reporting"$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	grant := config.Grant{
+		Role:       "reporting",
+		Privileges: []string{"SELECT", "UPDATE"},
+		OnTables:   []string{"app.users", "App.Orders"},
+		Columns:    []string{"id", "email"},
+	}
+	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnTablesWithoutColumns(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
+	mock.ExpectExec(`^GRANT SELECT, INSERT ON TABLE "app"\."users" TO "app"$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	grant := config.Grant{Role: "app", Privileges: []string{"SELECT", "INSERT"}, OnTables: []string{"app.users"}}
+	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnTablesMissingTableFails(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."ghost"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+
+	p := &Provisioner{}
+	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.ghost"}}
+	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost") {
+		t.Fatalf("expected missing table error, got %v", err)
+	}
+}
+
+func TestDryRunObjectGrantMissingTableDoesNotFail(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."future"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	// No GRANT executed in dry-run.
+
+	p := &Provisioner{opts: dryRunOptions()}
+	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.future"}}
+	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestObjectGrantsRunAfterMigrations checks the per-database order: schema-level grants,
+// then migrations, then on_tables grants — even when on_tables is listed first.
+func TestObjectGrantsRunAfterMigrations(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "V0001__init.sql"), []byte("CREATE TABLE app.users (id int);"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := config.Database{
+		Name: "mydb",
+		Grants: []config.Grant{
+			{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users"}},
+			{Role: "app", Privileges: []string{"USAGE"}, OnSchema: "app"},
+		},
+		Migrations: &config.Migrations{Directory: dir},
+	}
+
+	mock.ExpectExec(`^GRANT USAGE ON SCHEMA "app" TO "app"$`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS _schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT .+ FROM _schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "type", "checksum"}))
+	mock.ExpectBegin()
+	mock.ExpectExec(`CREATE TABLE app.users`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT INTO _schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
+	mock.ExpectExec(`^GRANT SELECT ON TABLE "app"\."users" TO "app"$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{opts: DefaultOptions()}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
