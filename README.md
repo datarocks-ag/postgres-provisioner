@@ -192,6 +192,16 @@ databases:
   Without `version`, installed extensions are never updated. `strategy: create` never updates.
 - An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
   breaks references to its objects — a warning with the command to run is logged instead.
+- **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` only work when their
+  library is in the server's `shared_preload_libraries` (which needs a restart). The provisioner
+  installs them either way and logs a warning if the library isn't loaded. For postgres_exporter's
+  `pg_stat_statements` metrics, start the server with it, e.g. in Docker Compose:
+
+  ```yaml
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+  ```
 
 ## Environment Variables
 

@@ -25,17 +25,22 @@ import (
 	"postgres-provisioner/internal/provisioner"
 )
 
-func setupPostgres(t *testing.T) (*sql.DB, db.ConnConfig, func()) {
+// setupPostgres starts a PostgreSQL container. serverArgs are appended to the postgres
+// command line, e.g. "-c", "shared_preload_libraries=pg_stat_statements".
+func setupPostgres(t *testing.T, serverArgs ...string) (*sql.DB, db.ConnConfig, func()) {
 	t.Helper()
 	ctx := context.Background()
 
-	pgContainer, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+	opts := []testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("postgres"),
 		postgres.WithUsername("admin"),
 		postgres.WithPassword("adminpass"),
 		postgres.BasicWaitStrategies(),
-	)
+	}
+	if len(serverArgs) > 0 {
+		opts = append(opts, testcontainers.WithCmdArgs(serverArgs...))
+	}
+	pgContainer, err := postgres.Run(ctx, "postgres:16-alpine", opts...)
 	if err != nil {
 		t.Fatalf("failed to start postgres container: %v", err)
 	}
@@ -2017,4 +2022,46 @@ databases:
 	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.10" {
 		t.Errorf("expected pg_stat_statements updated to 1.10, got %s", version)
 	}
+}
+
+// TestIntegrationPreloadLibraryWarning verifies the shared_preload_libraries warning for
+// pg_stat_statements against a server without and with the library preloaded.
+func TestIntegrationPreloadLibraryWarning(t *testing.T) {
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "statsdb"
+    extensions: ["pg_stat_statements"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runAndCaptureLogs := func(t *testing.T, serverArgs ...string) string {
+		t.Helper()
+		adminDB, connCfg, cleanup := setupPostgres(t, serverArgs...)
+		defer cleanup()
+
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		defer slog.SetDefault(prev)
+
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background()); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+		return logs.String()
+	}
+
+	t.Run("not preloaded", func(t *testing.T) {
+		logs := runAndCaptureLogs(t)
+		if !strings.Contains(logs, "requires shared_preload_libraries") || !strings.Contains(logs, "library=pg_stat_statements") {
+			t.Errorf("expected preload warning, logs:\n%s", logs)
+		}
+	})
+	t.Run("preloaded", func(t *testing.T) {
+		logs := runAndCaptureLogs(t, "-c", "shared_preload_libraries=pg_stat_statements")
+		if strings.Contains(logs, "requires shared_preload_libraries") {
+			t.Errorf("expected no preload warning, logs:\n%s", logs)
+		}
+	})
 }

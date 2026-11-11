@@ -200,6 +200,7 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 			return fmt.Errorf("provisioning extension %q in database %q: %w", ext.Name, database.Name, err)
 		}
 	}
+	p.warnMissingPreloadLibraries(ctx, dbConn, database)
 
 	// 6. Revokes (before grants, so "revoke from PUBLIC, grant to app" converges)
 	for _, revoke := range database.Revokes {

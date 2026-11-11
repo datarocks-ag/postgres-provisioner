@@ -67,3 +67,60 @@ func createExtensionSQL(ext config.Extension) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// preloadLibraries maps extensions to the library they require in the server's
+// shared_preload_libraries. CREATE EXTENSION succeeds without it, but the extension's
+// views/functions fail at use time — e.g. pg_stat_statements, which postgres_exporter reads.
+var preloadLibraries = map[string]string{
+	"pg_stat_statements": "pg_stat_statements",
+	"pg_cron":            "pg_cron",
+	"timescaledb":        "timescaledb",
+}
+
+// warnMissingPreloadLibraries logs a warning for each configured extension whose library
+// is not in shared_preload_libraries. The provisioner can't fix this itself: the setting
+// requires a server restart. Failure to read the setting is logged at debug level only,
+// since a non-superuser admin may not be allowed to see it.
+func (p *Provisioner) warnMissingPreloadLibraries(ctx context.Context, dbConn *sql.DB, database config.Database) {
+	missing, err := missingPreloadLibraries(ctx, dbConn, database.Extensions)
+	if err != nil {
+		slog.Debug("Could not check shared_preload_libraries", "database", database.Name, "error", err)
+		return
+	}
+	for _, lib := range missing {
+		slog.Warn("Extension requires shared_preload_libraries; it is installed but will fail when used until the server is restarted with the library preloaded",
+			"database", database.Name, "library", lib,
+			"hint", "start postgres with -c shared_preload_libraries="+lib)
+	}
+}
+
+// missingPreloadLibraries returns the preload libraries required by exts that the server
+// has not loaded. It only queries the server when at least one extension needs preloading.
+func missingPreloadLibraries(ctx context.Context, dbConn *sql.DB, exts []config.Extension) ([]string, error) {
+	var needed []string
+	for _, ext := range exts {
+		if lib, ok := preloadLibraries[ext.Name]; ok {
+			needed = append(needed, lib)
+		}
+	}
+	if len(needed) == 0 {
+		return nil, nil
+	}
+
+	var raw string
+	if err := dbConn.QueryRowContext(ctx, "SHOW shared_preload_libraries").Scan(&raw); err != nil {
+		return nil, err
+	}
+	loaded := make(map[string]bool)
+	for _, lib := range strings.Split(raw, ",") {
+		loaded[strings.Trim(strings.TrimSpace(lib), `"`)] = true
+	}
+
+	var missing []string
+	for _, lib := range needed {
+		if !loaded[lib] {
+			missing = append(missing, lib)
+		}
+	}
+	return missing, nil
+}

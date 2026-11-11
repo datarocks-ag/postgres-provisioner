@@ -3083,3 +3083,69 @@ func TestDryRunExtensionVersionUpdateDoesNotExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMissingPreloadLibraries(t *testing.T) {
+	exts := []config.Extension{{Name: "pgcrypto"}, {Name: "pg_stat_statements"}, {Name: "pg_cron"}}
+	tests := []struct {
+		name    string
+		loaded  string
+		missing string
+	}{
+		{"nothing preloaded", "", "pg_stat_statements,pg_cron"},
+		{"one preloaded", "pg_stat_statements", "pg_cron"},
+		{"all preloaded with spaces and quotes", `auto_explain, "pg_cron", pg_stat_statements`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+			mock.ExpectQuery(`SHOW shared_preload_libraries`).
+				WillReturnRows(sqlmock.NewRows([]string{"shared_preload_libraries"}).AddRow(tt.loaded))
+
+			missing, err := missingPreloadLibraries(context.Background(), mockDB, exts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(missing, ","); got != tt.missing {
+				t.Errorf("missing = %q, want %q", got, tt.missing)
+			}
+		})
+	}
+}
+
+func TestMissingPreloadLibrariesSkipsQueryWhenNotNeeded(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	// No SHOW expected.
+
+	missing, err := missingPreloadLibraries(context.Background(), mockDB, []config.Extension{{Name: "pgcrypto"}})
+	if err != nil || missing != nil {
+		t.Fatalf("expected (nil, nil), got (%v, %v)", missing, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWarnMissingPreloadLibrariesIgnoresShowError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	mock.ExpectQuery(`SHOW shared_preload_libraries`).WillReturnError(fmt.Errorf("permission denied"))
+
+	p := &Provisioner{}
+	// Must not panic or fail provisioning.
+	p.warnMissingPreloadLibraries(context.Background(), mockDB,
+		config.Database{Name: "db", Extensions: []config.Extension{{Name: "pg_stat_statements"}}})
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
