@@ -92,6 +92,31 @@ type Grant struct {
 	OnTablesInSchema   string   `yaml:"on_tables_in_schema"`
 }
 
+// GrantTarget identifies the kind of object a grant applies to. Its value is the YAML key.
+type GrantTarget string
+
+// Grant targets, one per YAML key.
+const (
+	TargetDatabase       GrantTarget = "on_database"
+	TargetSchema         GrantTarget = "on_schema"
+	TargetTablesInSchema GrantTarget = "on_tables_in_schema"
+)
+
+// Targets returns every target set on the grant. A valid grant has exactly one.
+func (g Grant) Targets() []GrantTarget {
+	var targets []GrantTarget
+	if g.OnDatabase {
+		targets = append(targets, TargetDatabase)
+	}
+	if g.OnSchema != "" {
+		targets = append(targets, TargetSchema)
+	}
+	if g.OnTablesInSchema != "" {
+		targets = append(targets, TargetTablesInSchema)
+	}
+	return targets
+}
+
 // Schema defines a database schema.
 type Schema struct {
 	Name  string `yaml:"name"`
@@ -440,17 +465,7 @@ func validate(cfg *Config) error {
 					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: invalid privilege %q", i, j, k, priv)
 				}
 			}
-			targets := 0
-			if g.OnSchema != "" {
-				targets++
-			}
-			if g.OnDatabase {
-				targets++
-			}
-			if g.OnTablesInSchema != "" {
-				targets++
-			}
-			if targets != 1 {
+			if len(g.Targets()) != 1 {
 				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_schema, on_database, or on_tables_in_schema is required", i, j)
 			}
 		}
