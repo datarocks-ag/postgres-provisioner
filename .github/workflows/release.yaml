@@ -56,7 +56,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Create and publish test coverage badge
-        uses: vladopajic/go-test-coverage@v2
+        uses: vladopajic/go-test-coverage@v2201
         with:
           profile: coverage.out
           threshold-total: 75
