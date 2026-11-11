@@ -81,7 +81,7 @@ func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Option
 }
 
 // Run executes the full provisioning sequence:
-// Roles -> Role memberships -> Databases -> (per-db) Extensions -> Schemas -> Grants -> Migrations
+// Roles -> Role memberships -> Databases -> (per-db) Extensions -> Schemas -> Revokes -> Grants -> Migrations
 func (p *Provisioner) Run(ctx context.Context) error {
 	if p.opts.DryRun {
 		slog.Info("Starting provisioning in DRY RUN mode — no changes will be applied")
@@ -141,6 +141,7 @@ func (p *Provisioner) Run(ctx context.Context) error {
 				"database", database.Name,
 				"extensions", len(database.Extensions),
 				"schemas", len(database.Schemas),
+				"revokes", len(database.Revokes),
 				"grants", len(database.Grants),
 				"migrations", database.Migrations != nil && database.Migrations.Directory != "",
 			)
@@ -182,14 +183,21 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		}
 	}
 
-	// 6. Grants (always applied — GRANT is idempotent)
+	// 6. Revokes (before grants, so "revoke from PUBLIC, grant to app" converges)
+	for _, revoke := range database.Revokes {
+		if err := p.applyRevoke(ctx, dbConn, database, revoke); err != nil {
+			return fmt.Errorf("applying revoke for role %q in database %q: %w", revoke.Role, database.Name, err)
+		}
+	}
+
+	// 7. Grants (always applied — GRANT is idempotent)
 	for _, grant := range database.Grants {
 		if err := p.applyGrant(ctx, dbConn, database, grant); err != nil {
 			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
 		}
 	}
 
-	// 7. Migrations
+	// 8. Migrations
 	if database.Migrations != nil && database.Migrations.Directory != "" {
 		if !p.opts.MigrationsEnabled {
 			slog.Info("Migrations disabled, skipping", "database", database.Name)

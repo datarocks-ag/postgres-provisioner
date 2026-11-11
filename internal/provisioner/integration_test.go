@@ -1155,3 +1155,116 @@ databases:
 		}
 	}
 }
+
+// TestIntegrationRevokePublicConnect hardens a database so only explicitly granted roles
+// can connect, and verifies a second run is a no-op.
+func TestIntegrationRevokePublicConnect(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+  - name: "outsider"
+    password: "outsiderpass"
+    options: { login: true }
+
+databases:
+  - name: "hardened"
+    revokes:
+      - { role: "PUBLIC", privileges: ["ALL"], on_database: true }
+    grants:
+      - { role: "app", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for run := 1; run <= 2; run++ {
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run %d failed: %v", run, err)
+		}
+	}
+
+	privilege := func(role, priv string) bool {
+		t.Helper()
+		var has bool
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT has_database_privilege($1, 'hardened', $2)`, role, priv,
+		).Scan(&has); err != nil {
+			t.Fatal(err)
+		}
+		return has
+	}
+	if privilege("outsider", "CONNECT") {
+		t.Error("expected outsider to lose CONNECT after revoking from PUBLIC")
+	}
+	if privilege("outsider", "TEMPORARY") {
+		t.Error("expected outsider to lose TEMPORARY after revoking ALL from PUBLIC")
+	}
+	if !privilege("app", "CONNECT") {
+		t.Error("expected app to keep CONNECT via its explicit grant")
+	}
+
+	appDB := connectAs(t, connCfg, "app", "apppass", "hardened")
+	if err := appDB.PingContext(ctx); err != nil {
+		t.Errorf("app should be able to connect: %v", err)
+	}
+}
+
+// TestIntegrationRevokeCreateOnPublicSchema revokes CREATE on the public schema from
+// PUBLIC. PostgreSQL 15+ already denies it by default, so the test grants it first to
+// exercise an actual revoke (and the "already revoked" path on the first run).
+func TestIntegrationRevokeCreateOnPublicSchema(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "someone"
+    options: { login: true }
+
+databases:
+  - name: "schemahardening"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CREATE"], on_schema: "public" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	dbConn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "schemahardening")
+	if _, err := dbConn.ExecContext(ctx, `GRANT CREATE ON SCHEMA public TO PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	canCreate := func() bool {
+		t.Helper()
+		var has bool
+		if err := dbConn.QueryRowContext(ctx,
+			`SELECT has_schema_privilege('someone', 'public', 'CREATE')`,
+		).Scan(&has); err != nil {
+			t.Fatal(err)
+		}
+		return has
+	}
+	if !canCreate() {
+		t.Fatal("precondition: expected someone to have CREATE via PUBLIC")
+	}
+
+	run()
+	if canCreate() {
+		t.Error("expected CREATE on schema public to be revoked from PUBLIC")
+	}
+}

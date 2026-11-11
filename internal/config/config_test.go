@@ -1218,3 +1218,137 @@ databases:
 		t.Fatalf("expected exactly-one-target error, got: %v", err)
 	}
 }
+
+func TestLoadRevokes(t *testing.T) {
+	t.Setenv("REVOKE_SCHEMA", "public")
+	path := writeTempConfig(t, `
+roles:
+  - name: "app"
+databases:
+  - name: "db1"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+      - { role: "public", privileges: ["CREATE"], on_schema: "${REVOKE_SCHEMA}" }
+      - { role: "app", privileges: ["TEMP"], on_database: true }
+    grants:
+      - { role: "app", privileges: ["CONNECT"], on_database: true }
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.Databases[0].Revokes[1].OnSchema; got != "public" {
+		t.Errorf("expected expanded schema 'public', got %q", got)
+	}
+}
+
+func TestValidationRevokeErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries string
+		wantErr string
+	}{
+		{
+			name: "undeclared role",
+			entries: `revokes:
+      - { role: "ghost", privileges: ["CONNECT"], on_database: true }`,
+			wantErr: `databases[0].revokes[0].role: role "ghost" is not declared in roles`,
+		},
+		{
+			name: "unsupported target",
+			entries: `revokes:
+      - { role: "PUBLIC", privileges: ["SELECT"], on_tables_in_schema: "app" }`,
+			wantErr: "databases[0].revokes[0]: on_tables_in_schema is not supported for revokes",
+		},
+		{
+			name: "privilege invalid for target",
+			entries: `revokes:
+      - { role: "PUBLIC", privileges: ["USAGE"], on_database: true }`,
+			wantErr: `databases[0].revokes[0].privileges[0]: privilege "USAGE" is not valid for on_database`,
+		},
+		{
+			name: "missing target",
+			entries: `revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"] }`,
+			wantErr: "databases[0].revokes[0]: exactly one of on_database or on_schema is required",
+		},
+		{
+			name: "conflicts with grant",
+			entries: `revokes:
+      - { role: "app", privileges: ["CONNECT"], on_database: true }
+    grants:
+      - { role: "app", privileges: ["CONNECT"], on_database: true }`,
+			wantErr: `databases[0].revokes[0]: conflicts with grants[0] (role "app", CONNECT on database)`,
+		},
+		{
+			name: "ALL conflicts with specific grant",
+			entries: `revokes:
+      - { role: "app", privileges: ["ALL"], on_schema: "data" }
+    grants:
+      - { role: "app", privileges: ["USAGE"], on_schema: "data" }`,
+			wantErr: `databases[0].revokes[0]: conflicts with grants[0] (role "app", USAGE on schema "data")`,
+		},
+		{
+			name: "TEMP conflicts with TEMPORARY",
+			entries: `revokes:
+      - { role: "app", privileges: ["temp"], on_database: true }
+    grants:
+      - { role: "app", privileges: ["TEMPORARY"], on_database: true }`,
+			wantErr: "conflicts with grants[0]",
+		},
+		{
+			name: "duplicate revoke",
+			entries: `revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+      - { role: "public", privileges: ["ALL"], on_database: true }`,
+			wantErr: `databases[0].revokes[1]: duplicates revokes[0] (role "PUBLIC", CONNECT on database)`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempConfig(t, `
+roles:
+  - name: "app"
+databases:
+  - name: "db1"
+    `+tt.entries+`
+`)
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidationGrantToPublicStillRejected(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    grants:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "is not declared in roles") {
+		t.Fatalf("expected undeclared role error for PUBLIC grant, got: %v", err)
+	}
+}
+
+func TestExpandPrivileges(t *testing.T) {
+	tests := []struct {
+		target GrantTarget
+		in     []string
+		want   string
+	}{
+		{TargetDatabase, []string{"ALL"}, "CONNECT,CREATE,TEMPORARY"},
+		{TargetDatabase, []string{"temp", "TEMPORARY", " connect "}, "CONNECT,TEMPORARY"},
+		{TargetSchema, []string{"all"}, "CREATE,USAGE"},
+		{TargetSchema, []string{"CREATE"}, "CREATE"},
+	}
+	for _, tt := range tests {
+		got := strings.Join(ExpandPrivileges(tt.target, tt.in), ",")
+		if got != tt.want {
+			t.Errorf("ExpandPrivileges(%s, %v) = %s, want %s", tt.target, tt.in, got, tt.want)
+		}
+	}
+}

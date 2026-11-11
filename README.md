@@ -206,8 +206,9 @@ services:
 3. **Databases** — created idempotently, owner set
 4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
 5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
-6. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
-7. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
+6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
+7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
+8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
 
 ## Grant Types
 
@@ -240,6 +241,34 @@ grants:
 
 **Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
 matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.
+
+## Revokes
+
+The provisioner is otherwise additive, but `revokes` explicitly removes privileges —
+typically PostgreSQL's defaults for `PUBLIC` (every role), to harden a database:
+
+```yaml
+databases:
+  - name: "myapp"
+    revokes:
+      - { role: PUBLIC, privileges: [ALL], on_database: true }    # CONNECT + TEMPORARY + CREATE
+      - { role: PUBLIC, privileges: [CREATE], on_schema: public }
+    grants:
+      - { role: app_user, privileges: [CONNECT], on_database: true }
+```
+
+- Same shape as grants. Supported targets: `on_database` and `on_schema`.
+- `role` is a declared role or `PUBLIC` (case-insensitive), the pseudo-role covering every role.
+  New databases grant `CONNECT` and `TEMPORARY` to `PUBLIC` by default.
+- Revokes run **before** grants, so revoking from `PUBLIC` and granting to specific roles converges.
+- Only privileges the grantee currently holds are revoked; otherwise the revoke is logged as
+  already applied and skipped.
+- A privilege both granted and revoked for the same role and object is a config error, as
+  are duplicate revokes.
+- `REVOKE` only removes privileges granted by the provisioning user (or the object owner).
+  If a privilege survives because another role granted it, a warning is logged.
+- With `strategy: create`, revokes (like other per-database resources) only apply to newly
+  created databases. Use `strategy: update` to harden an existing database.
 
 ## Migrations
 

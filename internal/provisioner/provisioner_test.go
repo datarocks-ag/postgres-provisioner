@@ -1930,3 +1930,145 @@ func TestDryRunGrantOnSequencesSkipsTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+const (
+	databaseExistsQuery = `SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`
+	databaseACLQuery    = `SELECT a.privilege_type\s+FROM pg_database o`
+	schemaExistsQuery   = `SELECT EXISTS\(SELECT 1 FROM pg_namespace WHERE nspname = \$1\)`
+	schemaACLQuery      = `SELECT a.privilege_type\s+FROM pg_namespace o`
+	roleOIDQuery        = `SELECT oid FROM pg_roles WHERE rolname = \$1`
+)
+
+func privilegeRows(privileges ...string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"privilege_type"})
+	for _, p := range privileges {
+		rows.AddRow(p)
+	}
+	return rows
+}
+
+func TestRevokeOnDatabasePublicUsesBareKeyword(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// Pre-check: PUBLIC (oid 0) holds the default CONNECT + TEMPORARY.
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(databaseACLQuery).WithArgs("myapp", int64(0)).
+		WillReturnRows(privilegeRows("CONNECT", "TEMPORARY"))
+	mock.ExpectExec(`^REVOKE CONNECT ON DATABASE "myapp" FROM PUBLIC$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Post-check: nothing left.
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(databaseACLQuery).WithArgs("myapp", int64(0)).
+		WillReturnRows(privilegeRows("TEMPORARY"))
+
+	p := &Provisioner{}
+	revoke := config.Grant{Role: "public", Privileges: []string{"CONNECT"}, OnDatabase: true}
+	if err := p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevokeOnlyRevokesHeldPrivileges(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(schemaExistsQuery).WithArgs("data").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(roleOIDQuery).WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"oid"}).AddRow(int64(16384)))
+	mock.ExpectQuery(schemaACLQuery).WithArgs("data", int64(16384)).
+		WillReturnRows(privilegeRows("USAGE"))
+	mock.ExpectExec(`^REVOKE USAGE ON SCHEMA "data" FROM "app"$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(schemaExistsQuery).WithArgs("data").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(roleOIDQuery).WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"oid"}).AddRow(int64(16384)))
+	mock.ExpectQuery(schemaACLQuery).WithArgs("data", int64(16384)).
+		WillReturnRows(privilegeRows())
+
+	p := &Provisioner{}
+	revoke := config.Grant{Role: "app", Privileges: []string{"ALL"}, OnSchema: "data"}
+	if err := p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevokeSkipsWhenNotHeld(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(schemaExistsQuery).WithArgs("public").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(schemaACLQuery).WithArgs("public", int64(0)).
+		WillReturnRows(privilegeRows("USAGE"))
+	// CREATE isn't held: no REVOKE expected.
+
+	p := &Provisioner{}
+	revoke := config.Grant{Role: "PUBLIC", Privileges: []string{"CREATE"}, OnSchema: "public"}
+	if err := p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevokeMissingSchemaFails(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(schemaExistsQuery).WithArgs("nope").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	p := &Provisioner{}
+	revoke := config.Grant{Role: "PUBLIC", Privileges: []string{"CREATE"}, OnSchema: "nope"}
+	err = p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke)
+	if err == nil || !strings.Contains(err.Error(), `schema "nope" does not exist`) {
+		t.Fatalf("expected missing schema error, got %v", err)
+	}
+}
+
+func TestDryRunRevokeDoesNotExecute(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(databaseACLQuery).WithArgs("myapp", int64(0)).
+		WillReturnRows(privilegeRows("CONNECT"))
+	// No REVOKE and no post-check in dry-run.
+
+	p := &Provisioner{opts: dryRunOptions()}
+	revoke := config.Grant{Role: "PUBLIC", Privileges: []string{"CONNECT"}, OnDatabase: true}
+	if err := p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
