@@ -198,16 +198,21 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 	}
 
 	// 8. Migrations
-	if database.Migrations != nil && database.Migrations.Directory != "" {
-		if !p.opts.MigrationsEnabled {
-			slog.Info("Migrations disabled, skipping", "database", database.Name)
-			return nil
-		}
-		if err := p.runMigrations(ctx, dbConn, database.Name, *database.Migrations); err != nil {
-			return fmt.Errorf("running migrations for database %q: %w", database.Name, err)
-		}
-	}
+	return p.migrateDatabase(ctx, dbConn, database)
+}
 
+// migrateDatabase runs the database's migrations if configured and enabled.
+func (p *Provisioner) migrateDatabase(ctx context.Context, dbConn *sql.DB, database config.Database) error {
+	if database.Migrations == nil || database.Migrations.Directory == "" {
+		return nil
+	}
+	if !p.opts.MigrationsEnabled {
+		slog.Info("Migrations disabled, skipping", "database", database.Name)
+		return nil
+	}
+	if err := p.runMigrations(ctx, dbConn, database.Name, *database.Migrations); err != nil {
+		return fmt.Errorf("running migrations for database %q: %w", database.Name, err)
+	}
 	return nil
 }
 
