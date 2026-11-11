@@ -221,7 +221,7 @@ func TestEnsureExtension(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{}
-	if err := p.ensureExtension(context.Background(), mockDB, "uuid-ossp"); err != nil {
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}); err != nil {
 		t.Fatalf("ensureExtension: %v", err)
 	}
 
@@ -796,7 +796,7 @@ func TestProvisionDatabaseResources(t *testing.T) {
 	database := config.Database{
 		Name:       "testdb",
 		Owner:      "appuser",
-		Extensions: []string{"uuid-ossp"},
+		Extensions: []config.Extension{{Name: "uuid-ossp"}},
 		Schemas: []config.Schema{
 			{Name: "app", Owner: "appuser"},
 		},
@@ -866,7 +866,7 @@ func TestProvisionDatabaseResourcesExtensionError(t *testing.T) {
 
 	database := config.Database{
 		Name:       "testdb",
-		Extensions: []string{"bad_ext"},
+		Extensions: []config.Extension{{Name: "bad_ext"}},
 	}
 
 	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "bad_ext"`).
@@ -1530,7 +1530,7 @@ func TestDryRunSchemaAndExtension(t *testing.T) {
 	// No Exec expectations — both must be skipped in dry-run mode.
 	p := &Provisioner{opts: dryRunOptions()}
 
-	if err := p.ensureExtension(context.Background(), mockDB, "uuid-ossp"); err != nil {
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}); err != nil {
 		t.Fatalf("ensureExtension: %v", err)
 	}
 	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "update"); err != nil {

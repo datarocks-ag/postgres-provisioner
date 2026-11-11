@@ -808,8 +808,8 @@ databases:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Databases[0].Extensions[0] != "pgcrypto" {
-		t.Errorf("expected extension 'pgcrypto', got %q", cfg.Databases[0].Extensions[0])
+	if cfg.Databases[0].Extensions[0].Name != "pgcrypto" {
+		t.Errorf("expected extension 'pgcrypto', got %q", cfg.Databases[0].Extensions[0].Name)
 	}
 }
 
@@ -1466,5 +1466,18 @@ databases:
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "databases[0].grants[0].columns[0]: environment variable OBJ_COLUMN_UNSET is not set") {
 		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}
+
+func TestExtensionRejectsNonScalar(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - ["pgcrypto"]
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "extension must be") {
+		t.Fatalf("expected extension shape error, got: %v", err)
 	}
 }

@@ -186,7 +186,7 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 	// 4. Extensions (always applied — CREATE EXTENSION IF NOT EXISTS is idempotent)
 	for _, ext := range database.Extensions {
 		if err := p.ensureExtension(ctx, dbConn, ext); err != nil {
-			return fmt.Errorf("provisioning extension %q in database %q: %w", ext, database.Name, err)
+			return fmt.Errorf("provisioning extension %q in database %q: %w", ext.Name, database.Name, err)
 		}
 	}
 

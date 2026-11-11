@@ -206,7 +206,7 @@ type Database struct {
 	Name       string          `yaml:"name"`
 	Owner      string          `yaml:"owner"`
 	Options    DatabaseOptions `yaml:"options"`
-	Extensions []string        `yaml:"extensions"`
+	Extensions []Extension     `yaml:"extensions"`
 	Schemas    []Schema        `yaml:"schemas"`
 	Grants     []Grant         `yaml:"grants"`
 	// Revokes lists privileges to remove, applied before Grants. Only on_database and
@@ -264,7 +264,7 @@ func expandConfig(cfg *Config) error {
 		d.Options.LcCtype = e.expand(path+".options.lc_ctype", d.Options.LcCtype)
 		d.Options.Template = e.expand(path+".options.template", d.Options.Template)
 		for j := range d.Extensions {
-			d.Extensions[j] = e.expand(fmt.Sprintf("%s.extensions[%d]", path, j), d.Extensions[j])
+			d.Extensions[j].Name = e.expand(fmt.Sprintf("%s.extensions[%d]", path, j), d.Extensions[j].Name)
 		}
 		for j := range d.Schemas {
 			sPath := fmt.Sprintf("%s.schemas[%d]", path, j)
@@ -696,10 +696,10 @@ func validate(cfg *Config) error {
 		}
 
 		for j, ext := range d.Extensions {
-			if ext == "" {
+			if ext.Name == "" {
 				return fmt.Errorf("databases[%d].extensions[%d]: name must not be empty", i, j)
 			}
-			if containsNullByte(ext) {
+			if containsNullByte(ext.Name) {
 				return fmt.Errorf("databases[%d].extensions[%d]: contains null byte", i, j)
 			}
 		}
