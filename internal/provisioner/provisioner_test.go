@@ -217,11 +217,12 @@ func TestEnsureExtension(t *testing.T) {
 	}
 	defer mockDB.Close()
 
+	expectExtensionMissing(mock, "uuid-ossp")
 	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{}
-	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}); err != nil {
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}, "update"); err != nil {
 		t.Fatalf("ensureExtension: %v", err)
 	}
 
@@ -816,6 +817,7 @@ func TestProvisionDatabaseResources(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// Extension
+	expectExtensionMissing(mock, "uuid-ossp")
 	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -869,6 +871,7 @@ func TestProvisionDatabaseResourcesExtensionError(t *testing.T) {
 		Extensions: []config.Extension{{Name: "bad_ext"}},
 	}
 
+	expectExtensionMissing(mock, "bad_ext")
 	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "bad_ext"`).
 		WillReturnError(fmt.Errorf("extension not available"))
 
@@ -1527,10 +1530,11 @@ func TestDryRunSchemaAndExtension(t *testing.T) {
 	}
 	defer mockDB.Close()
 
-	// No Exec expectations — both must be skipped in dry-run mode.
+	// Only the read-only extension lookup runs; no Exec — both must be skipped in dry-run mode.
+	expectExtensionMissing(mock, "uuid-ossp")
 	p := &Provisioner{opts: dryRunOptions()}
 
-	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}); err != nil {
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}, "update"); err != nil {
 		t.Fatalf("ensureExtension: %v", err)
 	}
 	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "update"); err != nil {
@@ -2937,5 +2941,145 @@ func TestDryRunPreviewsSettingsForDatabaseToBeCreated(t *testing.T) {
 		if !strings.HasPrefix(captured[i], want[i]) {
 			t.Errorf("captured[%d] = %q, want prefix %q", i, captured[i], want[i])
 		}
+	}
+}
+
+const extensionLookupQuery = `SELECT e.extversion, n.nspname\s+FROM pg_extension e`
+
+func expectExtensionMissing(mock sqlmock.Sqlmock, name string) {
+	mock.ExpectQuery(extensionLookupQuery).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows([]string{"extversion", "nspname"}))
+}
+
+func expectExtensionInstalled(mock sqlmock.Sqlmock, name, version, schema string) {
+	mock.ExpectQuery(extensionLookupQuery).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows([]string{"extversion", "nspname"}).AddRow(version, schema))
+}
+
+func TestEnsureExtensionWithSchemaVersionCascade(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionMissing(mock, "pg_stat_statements")
+	mock.ExpectExec(`^CREATE EXTENSION IF NOT EXISTS "pg_stat_statements" SCHEMA "monitoring" VERSION '1\.10' CASCADE$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Schema: "monitoring", Version: "1.10", Cascade: true}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionInstalledIsNoOp(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pgcrypto", "1.3", "public")
+	// No CREATE: installed and no version pinned.
+
+	p := &Provisioner{}
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "pgcrypto"}, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionVersionDriftUpdates(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	mock.ExpectExec(`^ALTER EXTENSION "pg_stat_statements" UPDATE TO '1\.10'$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionVersionDriftStrategyCreateSkips(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	// No ALTER with strategy=create.
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "create"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionSchemaDriftWarnsOnly(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pgcrypto", "1.3", "public")
+	// No ALTER EXTENSION ... SET SCHEMA.
+
+	var logs strings.Builder
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pgcrypto", Schema: "crypto"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "installed_schema=public") {
+		t.Errorf("expected schema drift warning, got logs:\n%s", logs.String())
+	}
+}
+
+func TestDryRunExtensionVersionUpdateDoesNotExecute(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+
+	p := &Provisioner{opts: dryRunOptions()}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

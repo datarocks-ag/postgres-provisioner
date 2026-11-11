@@ -169,6 +169,30 @@ databases:
   the admin user, changes how unqualified names in migrations resolve. Schema-qualify
   names in migrations or `SET search_path` at their top if that matters.
 
+### Extensions
+
+Extensions are listed by name, or as a mapping with options:
+
+```yaml
+databases:
+  - name: "myapp"
+    schemas:
+      - name: "crypto"
+    extensions:
+      - "uuid-ossp"                              # CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
+      - name: "pgcrypto"
+        schema: "crypto"                         # install into a (provisioned) schema
+      - name: "pg_stat_statements"
+        version: "1.10"                          # pin; updated via ALTER EXTENSION ... UPDATE TO
+        cascade: true                            # also install required extensions
+```
+
+- Missing extensions are created with the given `schema`, `version` and `cascade`.
+- An installed extension at a different pinned `version` is updated (`ALTER EXTENSION ... UPDATE TO`).
+  Without `version`, installed extensions are never updated. `strategy: create` never updates.
+- An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
+  breaks references to its objects — a warning with the command to run is logged instead.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |

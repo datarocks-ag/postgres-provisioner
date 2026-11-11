@@ -1938,3 +1938,83 @@ roles:
 		t.Errorf("second run should not change search_path, logs:\n%s", logs)
 	}
 }
+
+// installedExtension returns the installed version and schema of an extension in dbName.
+func installedExtension(t *testing.T, connCfg db.ConnConfig, dbName, ext string) (version, schema string) {
+	t.Helper()
+	cfg := connCfg
+	cfg.DBName = dbName
+	conn, err := db.Connect(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect to %s: %v", dbName, err)
+	}
+	defer conn.Close()
+	err = conn.QueryRowContext(context.Background(), `
+		SELECT e.extversion, n.nspname FROM pg_extension e
+		JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = $1`, ext,
+	).Scan(&version, &schema)
+	if err != nil {
+		t.Fatalf("look up extension %s: %v", ext, err)
+	}
+	return version, schema
+}
+
+func TestIntegrationExtensionInProvisionedSchema(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "extdb"
+    schemas:
+      - name: "crypto"
+    extensions:
+      - { name: pgcrypto, schema: crypto }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for run := 1; run <= 2; run++ {
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run %d failed: %v", run, err)
+		}
+	}
+
+	if _, schema := installedExtension(t, connCfg, "extdb", "pgcrypto"); schema != "crypto" {
+		t.Errorf("expected pgcrypto in schema crypto, got %q", schema)
+	}
+}
+
+func TestIntegrationExtensionVersionUpdate(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	runWithVersion := func(version string) {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+databases:
+  - name: "extversiondb"
+    extensions:
+      - { name: pg_stat_statements, version: %q }
+`, version)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run (version %s) failed: %v", version, err)
+		}
+	}
+
+	runWithVersion("1.9")
+	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.9" {
+		t.Fatalf("expected pg_stat_statements 1.9, got %s", version)
+	}
+
+	runWithVersion("1.10")
+	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.10" {
+		t.Errorf("expected pg_stat_statements updated to 1.10, got %s", version)
+	}
+}

@@ -264,7 +264,11 @@ func expandConfig(cfg *Config) error {
 		d.Options.LcCtype = e.expand(path+".options.lc_ctype", d.Options.LcCtype)
 		d.Options.Template = e.expand(path+".options.template", d.Options.Template)
 		for j := range d.Extensions {
-			d.Extensions[j].Name = e.expand(fmt.Sprintf("%s.extensions[%d]", path, j), d.Extensions[j].Name)
+			ext := &d.Extensions[j]
+			extPath := fmt.Sprintf("%s.extensions[%d]", path, j)
+			ext.Name = e.expand(extPath+".name", ext.Name)
+			ext.Schema = e.expand(extPath+".schema", ext.Schema)
+			ext.Version = e.expand(extPath+".version", ext.Version)
 		}
 		for j := range d.Schemas {
 			sPath := fmt.Sprintf("%s.schemas[%d]", path, j)
@@ -695,6 +699,7 @@ func validate(cfg *Config) error {
 			return fmt.Errorf("databases[%d].options: locale cannot be combined with lc_collate or lc_ctype", i)
 		}
 
+		extensionNames := make(map[string]bool)
 		for j, ext := range d.Extensions {
 			if ext.Name == "" {
 				return fmt.Errorf("databases[%d].extensions[%d]: name must not be empty", i, j)
@@ -702,6 +707,16 @@ func validate(cfg *Config) error {
 			if containsNullByte(ext.Name) {
 				return fmt.Errorf("databases[%d].extensions[%d]: contains null byte", i, j)
 			}
+			if err := checkNullBytes(
+				struct{ path, value string }{fmt.Sprintf("databases[%d].extensions[%d].schema", i, j), ext.Schema},
+				struct{ path, value string }{fmt.Sprintf("databases[%d].extensions[%d].version", i, j), ext.Version},
+			); err != nil {
+				return err
+			}
+			if extensionNames[ext.Name] {
+				return fmt.Errorf("databases[%d].extensions[%d]: duplicate extension %q", i, j, ext.Name)
+			}
+			extensionNames[ext.Name] = true
 		}
 
 		schemaNames := make(map[string]bool)

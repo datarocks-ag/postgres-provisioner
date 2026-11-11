@@ -66,8 +66,12 @@ databases:
     #   lc_ctype: "C"
     #   template: "template0"
     extensions:
-      - "uuid-ossp"
+      - "uuid-ossp"                    # plain name
       - "pgcrypto"
+      # - name: "pg_trgm"              # or a mapping with options:
+      #   schema: "app"                # install into a schema (schemas are created first)
+      #   version: "1.6"               # pin; updated with ALTER EXTENSION ... UPDATE TO
+      #   cascade: true                # also install required extensions
     schemas:
       - name: "app"
         owner: "app_user"             # optional, defaults to database owner

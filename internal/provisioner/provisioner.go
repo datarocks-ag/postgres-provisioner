@@ -196,7 +196,7 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 
 	// 5. Extensions (after schemas, so an extension can be installed into a provisioned schema)
 	for _, ext := range database.Extensions {
-		if err := p.ensureExtension(ctx, dbConn, ext); err != nil {
+		if err := p.ensureExtension(ctx, dbConn, ext, dbStrategy); err != nil {
 			return fmt.Errorf("provisioning extension %q in database %q: %w", ext.Name, database.Name, err)
 		}
 	}
