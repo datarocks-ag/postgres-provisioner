@@ -51,7 +51,8 @@ func readSecretFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	// Read-only handle: a Close error cannot lose data, so it is safe to ignore.
+	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxSecretFileSize+1))
 	if err != nil {
