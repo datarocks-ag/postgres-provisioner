@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,32 @@ var validPrivileges = map[string]bool{
 	"TEMPORARY":  true,
 	"TEMP":       true,
 	"EXECUTE":    true,
+}
+
+// privilegesByTarget lists the privileges PostgreSQL accepts for each grant target.
+// Checking them at load time turns a mid-run "invalid privilege type" failure into a
+// config error.
+var privilegesByTarget = map[GrantTarget]map[string]bool{
+	TargetDatabase:       privilegeSet("ALL", "CREATE", "CONNECT", "TEMPORARY", "TEMP"),
+	TargetSchema:         privilegeSet("ALL", "CREATE", "USAGE"),
+	TargetTablesInSchema: privilegeSet("ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+}
+
+func privilegeSet(privileges ...string) map[string]bool {
+	set := make(map[string]bool, len(privileges))
+	for _, p := range privileges {
+		set[p] = true
+	}
+	return set
+}
+
+func sortedPrivileges(set map[string]bool) []string {
+	privileges := make([]string, 0, len(set))
+	for p := range set {
+		privileges = append(privileges, p)
+	}
+	sort.Strings(privileges)
+	return privileges
 }
 
 // validStrategies is the allowlist of update strategy values.
@@ -450,8 +477,12 @@ func validate(cfg *Config) error {
 			if g.Role == "" {
 				return fmt.Errorf("databases[%d].grants[%d]: role is required", i, j)
 			}
-			if containsNullByte(g.Role) {
-				return fmt.Errorf("databases[%d].grants[%d].role: contains null byte", i, j)
+			if err := checkNullBytes(
+				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].role", i, j), g.Role},
+				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_schema", i, j), g.OnSchema},
+				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_tables_in_schema", i, j), g.OnTablesInSchema},
+			); err != nil {
+				return err
 			}
 			if !roleNames[g.Role] {
 				return fmt.Errorf("databases[%d].grants[%d].role: role %q is not declared in roles", i, j, g.Role)
@@ -459,14 +490,20 @@ func validate(cfg *Config) error {
 			if len(g.Privileges) == 0 {
 				return fmt.Errorf("databases[%d].grants[%d]: privileges is required", i, j)
 			}
+			targets := g.Targets()
+			if len(targets) != 1 {
+				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_schema, on_database, or on_tables_in_schema is required", i, j)
+			}
+			allowed := privilegesByTarget[targets[0]]
 			for k, priv := range g.Privileges {
 				normalized := strings.ToUpper(strings.TrimSpace(priv))
 				if !validPrivileges[normalized] {
 					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: invalid privilege %q", i, j, k, priv)
 				}
-			}
-			if len(g.Targets()) != 1 {
-				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_schema, on_database, or on_tables_in_schema is required", i, j)
+				if !allowed[normalized] {
+					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
+						i, j, k, priv, targets[0], strings.Join(sortedPrivileges(allowed), ", "))
+				}
 			}
 		}
 
