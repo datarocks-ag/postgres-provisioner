@@ -1654,3 +1654,138 @@ databases:
 		t.Errorf("SELECT on granted materialized view: %v", err)
 	}
 }
+
+// showSettingAs returns SHOW <setting> for a session of user in dbName, so role, database
+// and role-in-database defaults all apply.
+func showSettingAs(t *testing.T, connCfg db.ConnConfig, user, password, dbName, setting string) string {
+	t.Helper()
+	cfg := connCfg
+	cfg.User, cfg.Password, cfg.DBName = user, password, dbName
+	conn, err := db.Connect(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect as %s: %v", user, err)
+	}
+	defer conn.Close()
+	var value string
+	if err := conn.QueryRowContext(context.Background(), "SHOW "+setting).Scan(&value); err != nil {
+		t.Fatalf("SHOW %s: %v", setting, err)
+	}
+	return value
+}
+
+// captureLogsDuring redirects slog to a buffer for the duration of fn and returns the output.
+func captureLogsDuring(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
+
+func TestIntegrationRoleAndDatabaseSettings(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+    settings:
+      statement_timeout: "30s"
+      search_path: ["app", "$user", "public"]
+
+databases:
+  - name: "settingsdb"
+    settings:
+      TimeZone: "Asia/Tokyo"
+    role_settings:
+      app:
+        work_mem: "8MB"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	want := map[string]string{
+		"statement_timeout": "30s",
+		"search_path":       `app, "$user", public`,
+		"TimeZone":          "Asia/Tokyo",
+		"work_mem":          "8MB",
+	}
+	for setting, expected := range want {
+		if got := showSettingAs(t, connCfg, "app", "apppass", "settingsdb", setting); got != expected {
+			t.Errorf("SHOW %s = %q, want %q", setting, got, expected)
+		}
+	}
+	// The role-in-database setting must not leak into other databases.
+	if got := showSettingAs(t, connCfg, "app", "apppass", "postgres", "work_mem"); got == "8MB" {
+		t.Error("work_mem from role_settings should only apply in settingsdb")
+	}
+
+	logs := captureLogsDuring(t, run)
+	if strings.Contains(logs, "Applying setting") {
+		t.Errorf("second run should not change any setting, logs:\n%s", logs)
+	}
+}
+
+func TestIntegrationSettingsRemovalIsAdditiveAndNullResets(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	runWith := func(settingsYAML string) {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    options: { login: true }
+`+settingsYAML))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	storedSettings := func() string {
+		t.Helper()
+		var stored sql.NullString
+		err := adminDB.QueryRowContext(ctx, `
+			SELECT array_to_string(s.setconfig, ';') FROM pg_db_role_setting s
+			JOIN pg_roles r ON r.oid = s.setrole
+			WHERE r.rolname = 'app' AND s.setdatabase = 0`).Scan(&stored)
+		if err != nil && err != sql.ErrNoRows {
+			t.Fatal(err)
+		}
+		return stored.String
+	}
+
+	runWith(`    settings:
+      statement_timeout: "30s"`)
+	if got := storedSettings(); got != "statement_timeout=30s" {
+		t.Fatalf("expected statement_timeout=30s, got %q", got)
+	}
+
+	runWith("")
+	if got := storedSettings(); got != "statement_timeout=30s" {
+		t.Errorf("removing the setting from config must not reset it, got %q", got)
+	}
+
+	runWith(`    settings:
+      statement_timeout: null`)
+	if got := storedSettings(); got != "" {
+		t.Errorf("null should reset statement_timeout, got %q", got)
+	}
+}

@@ -122,6 +122,38 @@ on each database it should scrape.
   existing membership — the provisioner sees it as already granted. Fix it manually
   with `GRANT <group> TO <role> WITH INHERIT TRUE`, or revoke it and re-run.
 
+### Settings
+
+Run-time parameter defaults (`ALTER ROLE/DATABASE ... SET`) for roles, databases, and
+roles within one database. They take effect for new sessions.
+
+```yaml
+roles:
+  - name: "app_user"
+    settings:
+      statement_timeout: "30s"
+      search_path: ["app", "$user", "public"]   # list settings: one element per schema
+      work_mem: null                             # null resets (ALTER ROLE ... RESET)
+
+databases:
+  - name: "myapp"
+    settings:
+      TimeZone: "UTC"                            # ALTER DATABASE myapp SET timezone = 'UTC'
+    role_settings:
+      app_user:                                  # ALTER ROLE app_user IN DATABASE myapp SET ...
+        statement_timeout: "5min"
+```
+
+- Values are scalars (strings, numbers, booleans) or lists. Write list settings such as
+  `search_path` as a YAML list: `search_path: "app, public"` would name a single schema
+  called `app, public`. Values support `${VAR}` expansion.
+- Only settings whose stored value differs are changed. Removing a setting from the config
+  leaves it in place (additive); use `null` to reset it explicitly.
+- Names are case-insensitive and validated (`[A-Za-z_][A-Za-z0-9_$]*`, optionally with a
+  `prefix.` for custom parameters). Whether PostgreSQL accepts a parameter for a role or
+  database (e.g. `shared_buffers` can't be set per role) is only checked when it's applied.
+- With `strategy: create`, settings are only applied to newly created roles/databases.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -201,9 +233,9 @@ services:
 
 ## Provisioning Order
 
-1. **Roles** — created or updated idempotently
+1. **Roles** — created or updated idempotently, then role `settings`
 2. **Role memberships** — `GRANT <group> TO <role>` for each `member_of` entry not yet granted
-3. **Databases** — created idempotently, owner set
+3. **Databases** — created idempotently, owner set, then database `settings` and `role_settings`
 4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
 5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
 6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.

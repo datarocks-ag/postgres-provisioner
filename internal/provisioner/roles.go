@@ -10,8 +10,8 @@ import (
 	"postgres-provisioner/internal/config"
 )
 
-// ensureRole creates the role or, unless strategy is "create", updates an existing one.
-// It reports whether the role was created by this call.
+// ensureRole creates the role or, unless strategy is "create", updates an existing one,
+// then applies its settings. It reports whether the role was created by this call.
 func (p *Provisioner) ensureRole(ctx context.Context, role config.Role, strategy string) (bool, error) {
 	exists, err := roleExists(ctx, p.adminDB, role.Name)
 	if err != nil {
@@ -24,11 +24,17 @@ func (p *Provisioner) ensureRole(ctx context.Context, role config.Role, strategy
 			return false, nil
 		}
 		slog.Info("Role already exists, updating", "role", role.Name)
-		return false, p.alterRole(ctx, role)
+		if err := p.alterRole(ctx, role); err != nil {
+			return false, err
+		}
+	} else {
+		slog.Info("Creating role", "role", role.Name)
+		if err := p.createRole(ctx, role); err != nil {
+			return false, err
+		}
 	}
 
-	slog.Info("Creating role", "role", role.Name)
-	return true, p.createRole(ctx, role)
+	return !exists, p.applySettings(ctx, roleScope(role.Name), role.Settings)
 }
 
 // ensureMemberships grants the role membership in each of its member_of roles.

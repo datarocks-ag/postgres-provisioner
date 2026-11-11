@@ -110,6 +110,8 @@ type Role struct {
 	// MemberOf lists roles this role is granted membership in (GRANT <group> TO <role>).
 	// Entries may be predefined roles such as pg_monitor, so they need not be declared in roles.
 	MemberOf []string `yaml:"member_of"`
+	// Settings are role-wide run-time parameter defaults (ALTER ROLE ... SET).
+	Settings Settings `yaml:"settings"`
 	Strategy string   `yaml:"strategy"`
 }
 
@@ -211,7 +213,12 @@ type Database struct {
 	// on_schema targets are supported; role may be PUBLIC.
 	Revokes    []Grant     `yaml:"revokes"`
 	Migrations *Migrations `yaml:"migrations"`
-	Strategy   string      `yaml:"strategy"`
+	// Settings are database-wide run-time parameter defaults (ALTER DATABASE ... SET).
+	Settings Settings `yaml:"settings"`
+	// RoleSettings are per-role defaults within this database (ALTER ROLE ... IN DATABASE ... SET),
+	// keyed by role name.
+	RoleSettings map[string]Settings `yaml:"role_settings"`
+	Strategy     string              `yaml:"strategy"`
 }
 
 // Config is the top-level YAML configuration.
@@ -239,6 +246,7 @@ func expandConfig(cfg *Config) error {
 			validUntil := e.expand(path+".options.valid_until", *r.Options.ValidUntil)
 			r.Options.ValidUntil = &validUntil
 		}
+		e.expandSettings(path+".settings", r.Settings)
 	}
 	for i := range cfg.Databases {
 		d := &cfg.Databases[i]
@@ -246,6 +254,10 @@ func expandConfig(cfg *Config) error {
 		d.Name = e.expand(path+".name", d.Name)
 		d.Strategy = e.expand(path+".strategy", d.Strategy)
 		d.Owner = e.expand(path+".owner", d.Owner)
+		e.expandSettings(path+".settings", d.Settings)
+		for _, role := range sortedKeys(d.RoleSettings) {
+			e.expandSettings(path+".role_settings."+role, d.RoleSettings[role])
+		}
 		d.Options.Encoding = e.expand(path+".options.encoding", d.Options.Encoding)
 		d.Options.Locale = e.expand(path+".options.locale", d.Options.Locale)
 		d.Options.LcCollate = e.expand(path+".options.lc_collate", d.Options.LcCollate)
@@ -623,6 +635,9 @@ func validate(cfg *Config) error {
 		if err := validateMemberOf(i, r); err != nil {
 			return err
 		}
+		if err := validateSettings(fmt.Sprintf("roles[%d].settings", i), r.Settings); err != nil {
+			return err
+		}
 	}
 	if err := validateMemberOfCycles(cfg.Roles); err != nil {
 		return err
@@ -652,6 +667,18 @@ func validate(cfg *Config) error {
 
 		if d.Owner != "" && !roleNames[d.Owner] {
 			return fmt.Errorf("databases[%d].owner: role %q is not declared in roles", i, d.Owner)
+		}
+
+		if err := validateSettings(fmt.Sprintf("databases[%d].settings", i), d.Settings); err != nil {
+			return err
+		}
+		for _, role := range sortedKeys(d.RoleSettings) {
+			if !roleNames[role] {
+				return fmt.Errorf("databases[%d].role_settings: role %q is not declared in roles", i, role)
+			}
+			if err := validateSettings(fmt.Sprintf("databases[%d].role_settings.%s", i, role), d.RoleSettings[role]); err != nil {
+				return err
+			}
 		}
 
 		if err := checkNullBytes(

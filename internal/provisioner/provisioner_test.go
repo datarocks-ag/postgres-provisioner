@@ -2666,3 +2666,155 @@ func TestObjectGrantsRunAfterMigrations(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+const roleSettingsQuery = `SELECT unnest\(s.setconfig\) FROM pg_db_role_setting s\s+JOIN pg_roles r ON r.oid = s.setrole\s+WHERE r.rolname = \$1 AND s.setdatabase = 0`
+
+func settingRows(entries ...string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"unnest"})
+	for _, e := range entries {
+		rows.AddRow(e)
+	}
+	return rows
+}
+
+func TestApplySettingsOnlyChangesDifferingValues(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(roleSettingsQuery).WithArgs("app").
+		WillReturnRows(settingRows(
+			"statement_timeout=30s",
+			`search_path=app, "$user", public`,
+			"work_mem=4MB",
+		))
+	// search_path and statement_timeout match; only work_mem changes, lock_timeout resets
+	// nothing (not set), and the new jit setting is applied. Names are applied sorted.
+	mock.ExpectExec(`^ALTER ROLE "app" SET jit = 'off'$`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`^ALTER ROLE "app" SET work_mem = '64MB'$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	desired := config.Settings{
+		"statement_timeout": {Values: []string{"30s"}},
+		"search_path":       {Values: []string{"app", "$user", "public"}},
+		"Work_Mem":          {Values: []string{"64MB"}},
+		"lock_timeout":      {},
+		"jit":               {Values: []string{"off"}},
+	}
+	if err := p.applySettings(context.Background(), roleScope("app"), desired); err != nil {
+		t.Fatalf("applySettings: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplySettingsListQuotesEachElement(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(roleSettingsQuery).WithArgs("app").WillReturnRows(settingRows())
+	mock.ExpectExec(`^ALTER ROLE "app" SET search_path = 'app', '\$user', 'it''s'$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	desired := config.Settings{"search_path": {Values: []string{"app", "$user", "it's"}}}
+	if err := p.applySettings(context.Background(), roleScope("app"), desired); err != nil {
+		t.Fatalf("applySettings: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplySettingsResetsOnlyWhenSet(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT unnest\(s.setconfig\)`).WithArgs("app", "mydb").
+		WillReturnRows(settingRows("statement_timeout=5min"))
+	mock.ExpectExec(`^ALTER ROLE "app" IN DATABASE "mydb" RESET statement_timeout$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	desired := config.Settings{"statement_timeout": {}, "work_mem": {}}
+	if err := p.applySettings(context.Background(), roleInDatabaseScope("app", "mydb"), desired); err != nil {
+		t.Fatalf("applySettings: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunSettingsDoNotExecute(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT unnest\(s.setconfig\)`).WithArgs("mydb").WillReturnRows(settingRows())
+	// No ALTER DATABASE in dry-run.
+
+	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
+	desired := config.Settings{"timezone": {Values: []string{"UTC"}}}
+	if err := p.applySettings(context.Background(), databaseScope("mydb"), desired); err != nil {
+		t.Fatalf("applySettings: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureRoleCreateStrategySkipsSettings(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	// No settings query: strategy=create leaves existing roles untouched.
+
+	p := &Provisioner{adminDB: mockDB}
+	role := config.Role{Name: "app", Settings: config.Settings{"work_mem": {Values: []string{"64MB"}}}}
+	created, err := p.ensureRole(context.Background(), role, "create")
+	if err != nil {
+		t.Fatalf("ensureRole: %v", err)
+	}
+	if created {
+		t.Error("expected created=false for an existing role")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSettingMatches(t *testing.T) {
+	tests := []struct {
+		stored string
+		values []string
+		want   bool
+	}{
+		{"30s", []string{"30s"}, true},
+		{"31s", []string{"30s"}, false},
+		{`app, "$user", public`, []string{"app", "$user", "public"}, true},
+		{"app, public", []string{"app", "public"}, true},
+		{"app, public", []string{"public", "app"}, false},
+	}
+	for _, tt := range tests {
+		if got := settingMatches(tt.stored, tt.values); got != tt.want {
+			t.Errorf("settingMatches(%q, %v) = %v, want %v", tt.stored, tt.values, got, tt.want)
+		}
+	}
+}
