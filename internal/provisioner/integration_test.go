@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -942,5 +943,154 @@ roles:
 
 	if err := userDB.PingContext(ctx); err != nil {
 		t.Fatalf("ping as escaped_pw_user: %v", err)
+	}
+}
+
+// connectAs opens a connection to dbName as the given role.
+func connectAs(t *testing.T, connCfg db.ConnConfig, user, password, dbName string) *sql.DB {
+	t.Helper()
+	cfg := connCfg
+	cfg.User = user
+	cfg.Password = password
+	cfg.DBName = dbName
+	conn, err := db.Connect(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect as %s: %v", user, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// TestIntegrationSequenceGrantsAllowSerialInsert verifies that on_sequences_in_schema
+// is what lets a role insert into tables with serial columns created after provisioning,
+// and that identity columns need no sequence grant.
+func TestIntegrationSequenceGrantsAllowSerialInsert(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "owner"
+    password: "ownerpass"
+    options: { login: true }
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+  - name: "tables_only"
+    password: "tablespass"
+    options: { login: true }
+
+databases:
+  - name: "seqtest"
+    owner: "owner"
+    schemas:
+      - name: "data"
+        owner: "owner"
+    grants:
+      - { role: "app", privileges: ["USAGE"], on_schema: "data" }
+      - { role: "app", privileges: ["SELECT", "INSERT"], on_tables_in_schema: "data" }
+      - { role: "app", privileges: ["USAGE", "SELECT"], on_sequences_in_schema: "data" }
+      - { role: "tables_only", privileges: ["USAGE"], on_schema: "data" }
+      - { role: "tables_only", privileges: ["SELECT", "INSERT"], on_tables_in_schema: "data" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	ownerDB := connectAs(t, connCfg, "owner", "ownerpass", "seqtest")
+	if _, err := ownerDB.ExecContext(ctx, `
+		CREATE TABLE data.serial_items (id serial PRIMARY KEY, name text);
+		CREATE TABLE data.identity_items (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text);
+	`); err != nil {
+		t.Fatalf("create tables as owner: %v", err)
+	}
+
+	appDB := connectAs(t, connCfg, "app", "apppass", "seqtest")
+	if _, err := appDB.ExecContext(ctx, `INSERT INTO data.serial_items (name) VALUES ('ok')`); err != nil {
+		t.Errorf("app insert into serial table: %v", err)
+	}
+
+	tablesOnlyDB := connectAs(t, connCfg, "tables_only", "tablespass", "seqtest")
+	_, err = tablesOnlyDB.ExecContext(ctx, `INSERT INTO data.serial_items (name) VALUES ('denied')`)
+	if err == nil || !strings.Contains(err.Error(), "permission denied for sequence") {
+		t.Errorf("expected sequence permission error without sequence grant, got: %v", err)
+	}
+	if _, err := tablesOnlyDB.ExecContext(ctx, `INSERT INTO data.identity_items (name) VALUES ('ok')`); err != nil {
+		t.Errorf("identity column insert should not need a sequence grant: %v", err)
+	}
+
+	// A second run covers sequences that already exist (GRANT ... ON ALL SEQUENCES).
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("second provisioning run failed: %v", err)
+	}
+	var hasPrivilege bool
+	if err := ownerDB.QueryRowContext(ctx,
+		`SELECT has_sequence_privilege('app', 'data.serial_items_id_seq', 'USAGE')`,
+	).Scan(&hasPrivilege); err != nil {
+		t.Fatal(err)
+	}
+	if !hasPrivilege {
+		t.Error("expected app to have USAGE on data.serial_items_id_seq")
+	}
+}
+
+// TestIntegrationFunctionGrants verifies on_functions_in_schema for a function created
+// by a migration that revokes the default EXECUTE from PUBLIC.
+func TestIntegrationFunctionGrants(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__create_function.sql", `
+CREATE FUNCTION api.answer() RETURNS int LANGUAGE sql AS 'SELECT 42';
+REVOKE EXECUTE ON FUNCTION api.answer() FROM PUBLIC;
+`)
+
+	cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+roles:
+  - name: "caller"
+    password: "callerpass"
+    options: { login: true }
+  - name: "stranger"
+    password: "strangerpass"
+    options: { login: true }
+
+databases:
+  - name: "fntest"
+    schemas:
+      - name: "api"
+    grants:
+      - { role: "caller", privileges: ["USAGE"], on_schema: "api" }
+      - { role: "caller", privileges: ["EXECUTE"], on_functions_in_schema: "api" }
+      - { role: "stranger", privileges: ["USAGE"], on_schema: "api" }
+    migrations:
+      directory: %q
+`, migrationsDir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	callerDB := connectAs(t, connCfg, "caller", "callerpass", "fntest")
+	var answer int
+	if err := callerDB.QueryRowContext(ctx, `SELECT api.answer()`).Scan(&answer); err != nil {
+		t.Fatalf("caller should be able to execute api.answer(): %v", err)
+	}
+	if answer != 42 {
+		t.Errorf("expected 42, got %d", answer)
+	}
+
+	strangerDB := connectAs(t, connCfg, "stranger", "strangerpass", "fntest")
+	if err := strangerDB.QueryRowContext(ctx, `SELECT api.answer()`).Scan(&answer); err == nil {
+		t.Error("expected stranger to be denied EXECUTE on api.answer()")
 	}
 }

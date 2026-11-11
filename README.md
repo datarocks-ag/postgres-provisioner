@@ -211,9 +211,33 @@ services:
 
 ## Grant Types
 
-- `on_database: true` — grants privileges on the database itself (e.g., `CONNECT`)
-- `on_schema: "name"` — grants privileges on a schema (e.g., `ALL`, `USAGE`)
-- `on_tables_in_schema: "name"` — grants on all existing tables + sets `ALTER DEFAULT PRIVILEGES` for future tables
+Each grant sets exactly one target. Privileges are validated per target when the config is loaded:
+
+| Target | Applies to | Allowed privileges |
+|---|---|---|
+| `on_database: true` | the database itself | `CONNECT`, `CREATE`, `TEMPORARY`/`TEMP`, `ALL` |
+| `on_schema: "name"` | the schema | `USAGE`, `CREATE`, `ALL` |
+| `on_tables_in_schema: "name"` | all tables in the schema | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `ALL` |
+| `on_sequences_in_schema: "name"` | all sequences in the schema | `USAGE`, `SELECT`, `UPDATE`, `ALL` |
+| `on_functions_in_schema: "name"` | all functions and procedures in the schema | `EXECUTE`, `ALL` |
+
+The `*_in_schema` targets grant on all existing objects and set `ALTER DEFAULT PRIVILEGES`
+for objects created later, both by the provisioning user (e.g. via migrations) and by the
+schema owner (the schema's `owner`, falling back to the database owner). Objects created
+by any other role are not covered by the default privileges.
+
+**Tables with `serial` columns** also need sequence privileges, or inserts fail with
+`permission denied for sequence`. Identity columns (`GENERATED ... AS IDENTITY`) don't:
+
+```yaml
+grants:
+  - { role: app, privileges: [USAGE], on_schema: app }
+  - { role: app, privileges: [SELECT, INSERT, UPDATE, DELETE], on_tables_in_schema: app }
+  - { role: app, privileges: [USAGE, SELECT], on_sequences_in_schema: app }
+```
+
+**Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
+matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.
 
 ## Migrations
 

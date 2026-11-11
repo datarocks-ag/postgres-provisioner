@@ -22,6 +22,12 @@ func (p *Provisioner) applyGrant(ctx context.Context, dbConn *sql.DB, database c
 	case grant.OnTablesInSchema != "":
 		schema := grant.OnTablesInSchema
 		return p.grantOnObjectsInSchema(ctx, dbConn, tablesKind, schema, privs, role, schemaOwnerFor(database, schema))
+	case grant.OnSequencesInSchema != "":
+		schema := grant.OnSequencesInSchema
+		return p.grantOnObjectsInSchema(ctx, dbConn, sequencesKind, schema, privs, role, schemaOwnerFor(database, schema))
+	case grant.OnFunctionsInSchema != "":
+		schema := grant.OnFunctionsInSchema
+		return p.grantOnObjectsInSchema(ctx, dbConn, functionsKind, schema, privs, role, schemaOwnerFor(database, schema))
 	default:
 		return fmt.Errorf("no grant target specified")
 	}
@@ -49,7 +55,13 @@ type schemaObjectKind struct {
 	defaultKeyword string // keyword in ALTER DEFAULT PRIVILEGES ... ON <defaultKeyword>
 }
 
-var tablesKind = schemaObjectKind{label: "tables", allKeyword: "TABLES", defaultKeyword: "TABLES"}
+var (
+	tablesKind    = schemaObjectKind{label: "tables", allKeyword: "TABLES", defaultKeyword: "TABLES"}
+	sequencesKind = schemaObjectKind{label: "sequences", allKeyword: "SEQUENCES", defaultKeyword: "SEQUENCES"}
+	// ROUTINES covers both functions and procedures; ALTER DEFAULT PRIVILEGES ... ON FUNCTIONS
+	// likewise applies to procedures.
+	functionsKind = schemaObjectKind{label: "functions", allKeyword: "ROUTINES", defaultKeyword: "FUNCTIONS"}
+)
 
 // schemaOwnerFor returns the configured owner of schema, falling back to the database owner.
 func schemaOwnerFor(database config.Database, schema string) string {

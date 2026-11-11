@@ -79,6 +79,14 @@ databases:
         privileges: ["SELECT"]
         on_tables_in_schema: "app"    # GRANT SELECT ON ALL TABLES + ALTER DEFAULT PRIVILEGES
 
+      - role: "app_user"
+        privileges: ["USAGE", "SELECT"]
+        on_sequences_in_schema: "app" # needed for INSERT into serial columns
+
+      - role: "app_user"
+        privileges: ["EXECUTE"]
+        on_functions_in_schema: "app" # functions + procedures (PUBLIC has EXECUTE by default)
+
     # migrations:                       # optional: Flyway-style SQL migrations
     #   directory: "./migrations/myapp" # supports ${VAR} expansion
     #                                   # File naming:

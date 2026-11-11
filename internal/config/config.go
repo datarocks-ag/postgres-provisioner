@@ -34,9 +34,11 @@ var validPrivileges = map[string]bool{
 // Checking them at load time turns a mid-run "invalid privilege type" failure into a
 // config error.
 var privilegesByTarget = map[GrantTarget]map[string]bool{
-	TargetDatabase:       privilegeSet("ALL", "CREATE", "CONNECT", "TEMPORARY", "TEMP"),
-	TargetSchema:         privilegeSet("ALL", "CREATE", "USAGE"),
-	TargetTablesInSchema: privilegeSet("ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+	TargetDatabase:          privilegeSet("ALL", "CREATE", "CONNECT", "TEMPORARY", "TEMP"),
+	TargetSchema:            privilegeSet("ALL", "CREATE", "USAGE"),
+	TargetTablesInSchema:    privilegeSet("ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
+	TargetSequencesInSchema: privilegeSet("ALL", "USAGE", "SELECT", "UPDATE"),
+	TargetFunctionsInSchema: privilegeSet("ALL", "EXECUTE"),
 }
 
 func privilegeSet(privileges ...string) map[string]bool {
@@ -110,13 +112,15 @@ type Role struct {
 	Strategy string   `yaml:"strategy"`
 }
 
-// Grant defines a privilege grant.
+// Grant defines a privilege grant. Exactly one target field must be set.
 type Grant struct {
-	Role               string   `yaml:"role"`
-	Privileges         []string `yaml:"privileges"`
-	OnSchema           string   `yaml:"on_schema"`
-	OnDatabase         bool     `yaml:"on_database"`
-	OnTablesInSchema   string   `yaml:"on_tables_in_schema"`
+	Role                string   `yaml:"role"`
+	Privileges          []string `yaml:"privileges"`
+	OnSchema            string   `yaml:"on_schema"`
+	OnDatabase          bool     `yaml:"on_database"`
+	OnTablesInSchema    string   `yaml:"on_tables_in_schema"`
+	OnSequencesInSchema string   `yaml:"on_sequences_in_schema"`
+	OnFunctionsInSchema string   `yaml:"on_functions_in_schema"`
 }
 
 // GrantTarget identifies the kind of object a grant applies to. Its value is the YAML key.
@@ -124,9 +128,11 @@ type GrantTarget string
 
 // Grant targets, one per YAML key.
 const (
-	TargetDatabase       GrantTarget = "on_database"
-	TargetSchema         GrantTarget = "on_schema"
-	TargetTablesInSchema GrantTarget = "on_tables_in_schema"
+	TargetDatabase          GrantTarget = "on_database"
+	TargetSchema            GrantTarget = "on_schema"
+	TargetTablesInSchema    GrantTarget = "on_tables_in_schema"
+	TargetSequencesInSchema GrantTarget = "on_sequences_in_schema"
+	TargetFunctionsInSchema GrantTarget = "on_functions_in_schema"
 )
 
 // Targets returns every target set on the grant. A valid grant has exactly one.
@@ -140,6 +146,12 @@ func (g Grant) Targets() []GrantTarget {
 	}
 	if g.OnTablesInSchema != "" {
 		targets = append(targets, TargetTablesInSchema)
+	}
+	if g.OnSequencesInSchema != "" {
+		targets = append(targets, TargetSequencesInSchema)
+	}
+	if g.OnFunctionsInSchema != "" {
+		targets = append(targets, TargetFunctionsInSchema)
 	}
 	return targets
 }
@@ -237,6 +249,8 @@ func expandConfig(cfg *Config) error {
 			g.Role = e.expand(gPath+".role", g.Role)
 			g.OnSchema = e.expand(gPath+".on_schema", g.OnSchema)
 			g.OnTablesInSchema = e.expand(gPath+".on_tables_in_schema", g.OnTablesInSchema)
+			g.OnSequencesInSchema = e.expand(gPath+".on_sequences_in_schema", g.OnSequencesInSchema)
+			g.OnFunctionsInSchema = e.expand(gPath+".on_functions_in_schema", g.OnFunctionsInSchema)
 			for k := range g.Privileges {
 				g.Privileges[k] = e.expand(fmt.Sprintf("%s.privileges[%d]", gPath, k), g.Privileges[k])
 			}
@@ -481,6 +495,8 @@ func validate(cfg *Config) error {
 				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].role", i, j), g.Role},
 				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_schema", i, j), g.OnSchema},
 				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_tables_in_schema", i, j), g.OnTablesInSchema},
+				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_sequences_in_schema", i, j), g.OnSequencesInSchema},
+				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_functions_in_schema", i, j), g.OnFunctionsInSchema},
 			); err != nil {
 				return err
 			}
@@ -492,7 +508,7 @@ func validate(cfg *Config) error {
 			}
 			targets := g.Targets()
 			if len(targets) != 1 {
-				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_schema, on_database, or on_tables_in_schema is required", i, j)
+				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, or on_functions_in_schema is required", i, j)
 			}
 			allowed := privilegesByTarget[targets[0]]
 			for k, priv := range g.Privileges {
