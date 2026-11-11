@@ -27,6 +27,16 @@ roles:
     options:
       login: true
 
+  # Read-only monitoring account for postgres_exporter (Prometheus).
+  # member_of grants membership in other roles; predefined roles like pg_monitor
+  # (read all stats/settings, no table data access) need not be declared above.
+  - name: "postgres_exporter"
+    password: "${POSTGRES_EXPORTER_PASSWORD}"
+    member_of: ["pg_monitor"]
+    options:
+      login: true
+      connection_limit: 5
+
 databases:
   - name: "myapp"
     owner: "app_user"

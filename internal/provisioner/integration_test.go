@@ -792,3 +792,74 @@ databases:
 		t.Error("expected _schema_migrations table NOT to exist when migrations are disabled")
 	}
 }
+
+// TestIntegrationMonitoringRoleMembership provisions a non-superuser account for
+// postgres_exporter via pg_monitor membership and verifies it can read statistics
+// that are otherwise restricted to superusers, while not being able to write.
+func TestIntegrationMonitoringRoleMembership(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	configYAML := `
+roles:
+  - name: "postgres_exporter"
+    password: "exporterpass"
+    member_of: ["pg_monitor"]
+    options:
+      login: true
+      superuser: false
+`
+	cfgPath := writeTestConfig(t, configYAML)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+	for run := 1; run <= 2; run++ {
+		p := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions())
+		if err := p.Run(ctx); err != nil {
+			t.Fatalf("provisioning run %d failed: %v", run, err)
+		}
+	}
+
+	var isMember bool
+	if err := adminDB.QueryRowContext(ctx,
+		"SELECT pg_has_role('postgres_exporter', 'pg_monitor', 'MEMBER')",
+	).Scan(&isMember); err != nil {
+		t.Fatal(err)
+	}
+	if !isMember {
+		t.Fatal("expected postgres_exporter to be a member of pg_monitor")
+	}
+
+	exporterCfg := connCfg
+	exporterCfg.User = "postgres_exporter"
+	exporterCfg.Password = "exporterpass"
+	exporterDB, err := db.Connect(ctx, exporterCfg)
+	if err != nil {
+		t.Fatalf("connect as postgres_exporter: %v", err)
+	}
+	defer exporterDB.Close()
+
+	// Other sessions' query text is only visible with pg_read_all_stats (part of pg_monitor).
+	var hiddenQueries int
+	if err := exporterDB.QueryRowContext(ctx,
+		"SELECT count(*) FROM pg_stat_activity WHERE usename = 'admin' AND query = '<insufficient privilege>'",
+	).Scan(&hiddenQueries); err != nil {
+		t.Fatalf("query pg_stat_activity: %v", err)
+	}
+	if hiddenQueries != 0 {
+		t.Errorf("expected admin session queries to be visible, %d were hidden", hiddenQueries)
+	}
+
+	// pg_ls_waldir() is restricted to superusers and pg_monitor members.
+	var walFiles int
+	if err := exporterDB.QueryRowContext(ctx, "SELECT count(*) FROM pg_ls_waldir()").Scan(&walFiles); err != nil {
+		t.Fatalf("pg_ls_waldir as postgres_exporter: %v", err)
+	}
+
+	if _, err := exporterDB.ExecContext(ctx, "CREATE TABLE should_fail (id int)"); err == nil {
+		t.Error("expected postgres_exporter to be unable to create tables in the postgres database")
+	}
+}

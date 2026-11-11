@@ -74,6 +74,35 @@ databases:
       #                        mutually exclusive with lc_collate / lc_ctype
 ```
 
+### Role memberships
+
+`roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`).
+Entries can be roles declared in `roles` or PostgreSQL's
+[predefined roles](https://www.postgresql.org/docs/current/predefined-roles.html)
+such as `pg_monitor`, `pg_read_all_stats`, or `pg_read_all_data`. Memberships are
+applied after all roles exist, so ordering in the config doesn't matter. Existing
+memberships are skipped, and memberships not listed are never revoked (additive only).
+With `strategy: create`, memberships are only applied to newly created roles.
+
+**Example: a read-only monitoring user for `postgres_exporter`** — replaces the
+admin/superuser account in the exporter's `DATA_SOURCE_NAME`:
+
+```yaml
+roles:
+  - name: "postgres_exporter"
+    password: "${POSTGRES_EXPORTER_PASSWORD}"
+    member_of: ["pg_monitor"]   # pg_read_all_settings + pg_read_all_stats + pg_stat_scan_tables
+    options:
+      login: true
+      connection_limit: 5
+```
+
+`pg_monitor` can read all statistics views (`pg_stat_activity` including other
+sessions' queries, `pg_stat_replication`, `pg_stat_statements`, WAL/size functions)
+but cannot read or modify table data. Databases grant `CONNECT` to `PUBLIC` by
+default; if you revoked it, add an `on_database` `CONNECT` grant for the exporter role
+on each database it should scrape.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -120,11 +149,12 @@ password: "${APP_DB_PASSWORD}"    # replaced with env var value at load time
 ## Provisioning Order
 
 1. **Roles** — created or updated idempotently
-2. **Databases** — created idempotently, owner set
-3. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
-4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
-5. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
-6. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
+2. **Role memberships** — `GRANT <group> TO <role>` for each `member_of` entry not yet granted
+3. **Databases** — created idempotently, owner set
+4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
+5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
+6. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
+7. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
 
 ## Grant Types
 

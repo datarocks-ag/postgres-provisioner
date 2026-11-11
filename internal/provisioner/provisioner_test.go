@@ -43,7 +43,7 @@ func TestEnsureRoleCreate(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestEnsureRoleAlter(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestEnsureRoleCreateStrategySkipsExisting(t *testing.T) {
 	// No ALTER expected — strategy=create skips update
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "create"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "create"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -480,7 +480,7 @@ func TestAlterRoleNoChanges(t *testing.T) {
 	// No ALTER expected — alterRole returns early with "no changes"
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1170,7 +1170,7 @@ func TestEnsureRoleExistsQueryError(t *testing.T) {
 		WillReturnError(fmt.Errorf("connection lost"))
 
 	p := &Provisioner{adminDB: mockDB}
-	err = p.ensureRole(context.Background(), config.Role{Name: "testuser"}, "update")
+	_, err = p.ensureRole(context.Background(), config.Role{Name: "testuser"}, "update")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1225,7 +1225,7 @@ func TestEnsureRoleCreateWithOptions(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1255,7 +1255,7 @@ func TestEnsureRoleAlterWithOptions(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1285,7 +1285,7 @@ func TestCreateRoleNoPassword(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1337,7 +1337,7 @@ func TestRunFullProvisioning(t *testing.T) {
 	ctx := context.Background()
 	for _, role := range cfg.Roles {
 		strategy := config.EffectiveStrategy(role.Strategy, cfg.Strategy)
-		if err := p.ensureRole(ctx, role, strategy); err != nil {
+		if _, err := p.ensureRole(ctx, role, strategy); err != nil {
 			t.Fatalf("ensureRole: %v", err)
 		}
 	}
@@ -1430,7 +1430,7 @@ func TestDryRunRedactsPasswordInLog(t *testing.T) {
 
 	role := config.Role{Name: "alice", Password: "super-secret-pw"}
 	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1460,7 +1460,7 @@ func TestDryRunRoleCreate(t *testing.T) {
 
 	role := config.Role{Name: "alice", Password: "s3cret"}
 	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1483,7 +1483,7 @@ func TestDryRunRoleAlter(t *testing.T) {
 
 	role := config.Role{Name: "alice", Password: "rotated"}
 	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
-	if err := p.ensureRole(context.Background(), role, "update"); err != nil {
+	if _, err := p.ensureRole(context.Background(), role, "update"); err != nil {
 		t.Fatalf("ensureRole: %v", err)
 	}
 
@@ -1624,6 +1624,167 @@ func TestDryRunMigrationsPropagatesNonMissingTableErrors(t *testing.T) {
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected wrapped pq.Error to propagate, got: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const membershipQuery = `SELECT EXISTS\(\s*SELECT 1 FROM pg_auth_members m`
+
+func TestEnsureMembershipsGrantsMissingMembership(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(membershipQuery).
+		WithArgs("exporter", "pg_monitor").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`GRANT "pg_monitor" TO "exporter"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{adminDB: mockDB}
+	role := config.Role{Name: "exporter", MemberOf: []string{"pg_monitor"}}
+	if err := p.ensureMemberships(context.Background(), role); err != nil {
+		t.Fatalf("ensureMemberships: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureMembershipsSkipsExistingMembership(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(membershipQuery).
+		WithArgs("exporter", "pg_monitor").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	// No GRANT expected
+
+	p := &Provisioner{adminDB: mockDB}
+	role := config.Role{Name: "exporter", MemberOf: []string{"pg_monitor"}}
+	if err := p.ensureMemberships(context.Background(), role); err != nil {
+		t.Fatalf("ensureMemberships: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureMembershipsPropagatesGrantError(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(membershipQuery).
+		WithArgs("exporter", "missing_role").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`GRANT "missing_role" TO "exporter"`).
+		WillReturnError(fmt.Errorf(`role "missing_role" does not exist`))
+
+	p := &Provisioner{adminDB: mockDB}
+	role := config.Role{Name: "exporter", MemberOf: []string{"missing_role"}}
+	err = p.ensureMemberships(context.Background(), role)
+	if err == nil || !strings.Contains(err.Error(), "missing_role") {
+		t.Fatalf("expected grant error mentioning missing_role, got %v", err)
+	}
+}
+
+func TestDryRunMembershipDoesNotExecute(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(membershipQuery).
+		WithArgs("exporter", "pg_monitor").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	// GRANT must NOT be executed in dry-run mode
+
+	p := &Provisioner{adminDB: mockDB, opts: dryRunOptions()}
+	role := config.Role{Name: "exporter", MemberOf: []string{"pg_monitor"}}
+	if err := p.ensureMemberships(context.Background(), role); err != nil {
+		t.Fatalf("ensureMemberships: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunAppliesMembershipsAfterAllRoles verifies that a role can be a member of a
+// declared role listed later in the config, because memberships run in a second pass.
+func TestRunAppliesMembershipsAfterAllRoles(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	cfg := &config.Config{
+		Roles: []config.Role{
+			{Name: "alice", MemberOf: []string{"readers"}},
+			{Name: "readers"},
+		},
+	}
+
+	for _, name := range []string{"alice", "readers"} {
+		mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+			WithArgs(name).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		mock.ExpectExec(`CREATE ROLE "` + name + `"`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	mock.ExpectQuery(membershipQuery).
+		WithArgs("alice", "readers").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`GRANT "readers" TO "alice"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := New(mockDB, db.ConnConfig{}, cfg, DefaultOptions())
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunCreateStrategySkipsMembershipsForExistingRole(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	cfg := &config.Config{
+		Strategy: "create",
+		Roles: []config.Role{
+			{Name: "exporter", MemberOf: []string{"pg_monitor"}},
+		},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("exporter").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	// No membership check or GRANT expected
+
+	p := New(mockDB, db.ConnConfig{}, cfg, DefaultOptions())
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

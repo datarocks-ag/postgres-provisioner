@@ -10,23 +10,63 @@ import (
 	"postgres-provisioner/internal/config"
 )
 
-func (p *Provisioner) ensureRole(ctx context.Context, role config.Role, strategy string) error {
+// ensureRole creates the role or, unless strategy is "create", updates an existing one.
+// It reports whether the role was created by this call.
+func (p *Provisioner) ensureRole(ctx context.Context, role config.Role, strategy string) (bool, error) {
 	exists, err := roleExists(ctx, p.adminDB, role.Name)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if exists {
 		if strategy == "create" {
 			slog.Info("Skipping existing role (strategy=create)", "role", role.Name)
-			return nil
+			return false, nil
 		}
 		slog.Info("Role already exists, updating", "role", role.Name)
-		return p.alterRole(ctx, role)
+		return false, p.alterRole(ctx, role)
 	}
 
 	slog.Info("Creating role", "role", role.Name)
-	return p.createRole(ctx, role)
+	return true, p.createRole(ctx, role)
+}
+
+// ensureMemberships grants the role membership in each of its member_of roles.
+// Memberships that already exist are skipped; memberships not listed are never revoked.
+func (p *Provisioner) ensureMemberships(ctx context.Context, role config.Role) error {
+	for _, group := range role.MemberOf {
+		isMember, err := hasDirectMembership(ctx, p.adminDB, role.Name, group)
+		if err != nil {
+			return fmt.Errorf("checking membership in %q: %w", group, err)
+		}
+		if isMember {
+			slog.Info("Role membership already granted, skipping", "role", role.Name, "member_of", group)
+			continue
+		}
+
+		slog.Info("Granting role membership", "role", role.Name, "member_of", group)
+		query := fmt.Sprintf("GRANT %s TO %s", quoteIdentifier(group), quoteIdentifier(role.Name))
+		if _, err := p.execMutation(ctx, p.adminDB, query); err != nil {
+			return fmt.Errorf("granting membership in %q: %w", group, err)
+		}
+	}
+	return nil
+}
+
+// hasDirectMembership reports whether member is directly granted membership in group.
+// Inherited (transitive) memberships are intentionally not considered: the config
+// declares direct memberships, so those are what we reconcile.
+func hasDirectMembership(ctx context.Context, db *sql.DB, member, group string) (bool, error) {
+	var exists bool
+	err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM pg_auth_members m
+			JOIN pg_roles g ON g.oid = m.roleid
+			JOIN pg_roles u ON u.oid = m.member
+			WHERE u.rolname = $1 AND g.rolname = $2)`,
+		member, group,
+	).Scan(&exists)
+	return exists, err
 }
 
 func roleExists(ctx context.Context, db *sql.DB, name string) (bool, error) {

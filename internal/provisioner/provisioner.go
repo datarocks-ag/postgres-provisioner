@@ -81,7 +81,7 @@ func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Option
 }
 
 // Run executes the full provisioning sequence:
-// Roles -> Databases -> (per-db) Extensions -> Schemas -> Grants
+// Roles -> Role memberships -> Databases -> (per-db) Extensions -> Schemas -> Grants -> Migrations
 func (p *Provisioner) Run(ctx context.Context) error {
 	if p.opts.DryRun {
 		slog.Info("Starting provisioning in DRY RUN mode — no changes will be applied")
@@ -90,14 +90,34 @@ func (p *Provisioner) Run(ctx context.Context) error {
 	}
 
 	// 1. Roles
+	skipMemberships := make(map[string]bool)
 	for _, role := range p.cfg.Roles {
 		strategy := config.EffectiveStrategy(role.Strategy, p.cfg.Strategy)
-		if err := p.ensureRole(ctx, role, strategy); err != nil {
+		created, err := p.ensureRole(ctx, role, strategy)
+		if err != nil {
 			return fmt.Errorf("provisioning role %q: %w", role.Name, err)
+		}
+		if strategy == "create" && !created {
+			skipMemberships[role.Name] = true
 		}
 	}
 
-	// 2. Databases, then per-database resources
+	// 2. Role memberships — a separate pass so a role can be a member of another
+	// declared role regardless of the order in which they appear in the config.
+	for _, role := range p.cfg.Roles {
+		if len(role.MemberOf) == 0 {
+			continue
+		}
+		if skipMemberships[role.Name] {
+			slog.Info("Skipping memberships for existing role (strategy=create)", "role", role.Name)
+			continue
+		}
+		if err := p.ensureMemberships(ctx, role); err != nil {
+			return fmt.Errorf("provisioning memberships for role %q: %w", role.Name, err)
+		}
+	}
+
+	// 3. Databases, then per-database resources
 	for _, database := range p.cfg.Databases {
 		dbStrategy := config.EffectiveStrategy(database.Strategy, p.cfg.Strategy)
 		created, err := p.ensureDatabase(ctx, database, dbStrategy)
@@ -144,14 +164,14 @@ func (p *Provisioner) Run(ctx context.Context) error {
 }
 
 func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sql.DB, database config.Database, dbStrategy string) error {
-	// 3. Extensions (always applied — CREATE EXTENSION IF NOT EXISTS is idempotent)
+	// 4. Extensions (always applied — CREATE EXTENSION IF NOT EXISTS is idempotent)
 	for _, ext := range database.Extensions {
 		if err := p.ensureExtension(ctx, dbConn, ext); err != nil {
 			return fmt.Errorf("provisioning extension %q in database %q: %w", ext, database.Name, err)
 		}
 	}
 
-	// 4. Schemas (strategy inherited from database)
+	// 5. Schemas (strategy inherited from database)
 	for _, schema := range database.Schemas {
 		owner := schema.Owner
 		if owner == "" {
@@ -162,14 +182,14 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		}
 	}
 
-	// 5. Grants (always applied — GRANT is idempotent)
+	// 6. Grants (always applied — GRANT is idempotent)
 	for _, grant := range database.Grants {
 		if err := p.applyGrant(ctx, dbConn, database, grant); err != nil {
 			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
 		}
 	}
 
-	// 6. Migrations
+	// 7. Migrations
 	if database.Migrations != nil && database.Migrations.Directory != "" {
 		if !p.opts.MigrationsEnabled {
 			slog.Info("Migrations disabled, skipping", "database", database.Name)

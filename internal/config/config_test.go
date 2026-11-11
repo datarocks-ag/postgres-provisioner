@@ -978,3 +978,47 @@ func writeTempConfig(t *testing.T, content string) string {
 	}
 	return path
 }
+
+func TestLoadRoleMemberOf(t *testing.T) {
+	t.Setenv("MONITOR_ROLE", "pg_monitor")
+	path := writeTempConfig(t, `
+roles:
+  - name: "postgres_exporter"
+    member_of: ["${MONITOR_ROLE}", "pg_read_all_settings"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"pg_monitor", "pg_read_all_settings"}
+	got := cfg.Roles[0].MemberOf
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("expected member_of %v, got %v", want, got)
+	}
+}
+
+func TestValidationMemberOfInvalid(t *testing.T) {
+	cases := []struct {
+		name     string
+		memberOf string
+		wantErr  string
+	}{
+		{"empty entry", `[""]`, "must not be empty"},
+		{"self membership", `["exporter"]`, "cannot be a member of itself"},
+		{"duplicate entry", `["pg_monitor", "pg_monitor"]`, "duplicate role"},
+		{"null byte", `["pg_\u0000monitor"]`, "null byte"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, fmt.Sprintf(`
+roles:
+  - name: "exporter"
+    member_of: %s
+`, tc.memberOf))
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
