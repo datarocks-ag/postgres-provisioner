@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Role and database settings** — `roles[].settings` (`ALTER ROLE ... SET`), `databases[].settings` (`ALTER DATABASE ... SET`) and `databases[].role_settings` (`ALTER ROLE ... IN DATABASE ... SET`) set run-time parameter defaults such as `statement_timeout` or `search_path`. Lists are quoted per element (needed for `search_path`), an explicit `null` resets a setting (an empty value or `~` is rejected), and removing a setting from the config leaves it untouched. Current values are read from `pg_db_role_setting`, so unchanged settings are skipped. Supports dry-run and `${VAR}` expansion in values; `strategy: create` skips role settings for existing roles, and database settings and `role_settings` for existing databases (`role_settings` follow the database's strategy, not the role's). Use canonical parameter names: obsolete aliases such as `sort_mem` are stored as `work_mem` and therefore re-applied on every run.
 - **Provisioner sessions ignore risky role/database defaults** — every provisioner connection sets `statement_timeout=0`, `lock_timeout=0`, `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off` as connection startup options, so settings such as a read-only database default or a short `statement_timeout` can't break schema creation or migrations. `search_path` is not overridden.
 
+### Changed
+
+- **Schemas are now provisioned before extensions** (per database), so an extension can be installed into a schema the provisioner creates. Only the order of statements and log lines changes; `CREATE SCHEMA` never depends on an extension.
+
 ## [1.3.0] - 2026-07-16
 
 ### Added

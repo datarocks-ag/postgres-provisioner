@@ -809,14 +809,14 @@ func TestProvisionDatabaseResources(t *testing.T) {
 		},
 	}
 
-	// Extension
-	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	// Schema
+	// Schema (before extensions, so extensions can be installed into it)
 	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "appuser"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// Extension
+	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// Grant

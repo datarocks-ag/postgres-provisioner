@@ -251,8 +251,8 @@ services:
 1. **Roles** — created or updated idempotently, then role `settings`
 2. **Role memberships** — `GRANT <group> TO <role>` for each `member_of` entry not yet granted
 3. **Databases** — created idempotently, owner set, then database `settings` and `role_settings`
-4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
-5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
+4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
+5. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database). Runs after schemas, so extensions can be installed into a provisioned schema.
 6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
 7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
 8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
