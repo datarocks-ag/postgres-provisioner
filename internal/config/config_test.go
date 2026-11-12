@@ -978,3 +978,141 @@ func writeTempConfig(t *testing.T, content string) string {
 	}
 	return path
 }
+
+func TestLoadRoleMemberOf(t *testing.T) {
+	t.Setenv("MONITOR_ROLE", "pg_monitor")
+	path := writeTempConfig(t, `
+roles:
+  - name: "postgres_exporter"
+    member_of: ["${MONITOR_ROLE}", "pg_read_all_settings"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"pg_monitor", "pg_read_all_settings"}
+	got := cfg.Roles[0].MemberOf
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("expected member_of %v, got %v", want, got)
+	}
+}
+
+func TestValidationMemberOfInvalid(t *testing.T) {
+	cases := []struct {
+		name     string
+		memberOf string
+		wantErr  string
+	}{
+		{"empty entry", `[""]`, "must not be empty"},
+		{"self membership", `["exporter"]`, "cannot be a member of itself"},
+		{"duplicate entry", `["pg_monitor", "pg_monitor"]`, "duplicate role"},
+		{"null byte", `["pg_\u0000monitor"]`, "null byte"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, fmt.Sprintf(`
+roles:
+  - name: "exporter"
+    member_of: %s
+`, tc.memberOf))
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidationMemberOfCycles(t *testing.T) {
+	cases := []struct {
+		name    string
+		roles   string
+		wantErr string
+	}{
+		{
+			name: "two-role cycle",
+			roles: `
+  - name: "a"
+    member_of: ["b"]
+  - name: "b"
+    member_of: ["a"]`,
+			wantErr: "roles[1].member_of[0]: circular role membership a -> b -> a",
+		},
+		{
+			name: "three-role cycle",
+			roles: `
+  - name: "a"
+    member_of: ["pg_monitor", "b"]
+  - name: "b"
+    member_of: ["c"]
+  - name: "c"
+    member_of: ["a"]`,
+			wantErr: "roles[2].member_of[0]: circular role membership a -> b -> c -> a",
+		},
+		{
+			name: "cycle not reachable from first role",
+			roles: `
+  - name: "a"
+    member_of: ["pg_monitor"]
+  - name: "b"
+    member_of: ["c"]
+  - name: "c"
+    member_of: ["b"]`,
+			wantErr: "roles[2].member_of[0]: circular role membership b -> c -> b",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, "roles:"+tc.roles+"\n")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidationMemberOfAcyclic(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles string
+	}{
+		{
+			name: "chain",
+			roles: `
+  - name: "a"
+    member_of: ["b"]
+  - name: "b"
+    member_of: ["c"]
+  - name: "c"
+    member_of: ["pg_monitor"]`,
+		},
+		{
+			name: "diamond",
+			roles: `
+  - name: "a"
+    member_of: ["b", "c"]
+  - name: "b"
+    member_of: ["d"]
+  - name: "c"
+    member_of: ["d"]
+  - name: "d"`,
+		},
+		{
+			name: "shared undeclared group",
+			roles: `
+  - name: "a"
+    member_of: ["pg_monitor"]
+  - name: "b"
+    member_of: ["pg_monitor", "a"]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, "roles:"+tc.roles+"\n")
+			if _, err := Load(path); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

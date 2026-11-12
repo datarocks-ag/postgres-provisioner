@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -77,7 +78,10 @@ type Role struct {
 	Name     string      `yaml:"name"`
 	Password string      `yaml:"password"`
 	Options  RoleOptions `yaml:"options"`
-	Strategy string      `yaml:"strategy"`
+	// MemberOf lists roles this role is granted membership in (GRANT <group> TO <role>).
+	// Entries may be predefined roles such as pg_monitor, so they need not be declared in roles.
+	MemberOf []string `yaml:"member_of"`
+	Strategy string   `yaml:"strategy"`
 }
 
 // Grant defines a privilege grant.
@@ -155,6 +159,9 @@ func expandConfig(cfg *Config) {
 		cfg.Roles[i].Name = expandEnvVars(cfg.Roles[i].Name)
 		cfg.Roles[i].Password = expandEnvVars(cfg.Roles[i].Password)
 		cfg.Roles[i].Strategy = expandEnvVars(cfg.Roles[i].Strategy)
+		for j := range cfg.Roles[i].MemberOf {
+			cfg.Roles[i].MemberOf[j] = expandEnvVars(cfg.Roles[i].MemberOf[j])
+		}
 	}
 	for i := range cfg.Databases {
 		cfg.Databases[i].Name = expandEnvVars(cfg.Databases[i].Name)
@@ -226,6 +233,84 @@ func validateStrategy(path, value string) error {
 	return nil
 }
 
+// validateMemberOf checks a role's member_of entries. Group roles are not required to be
+// declared in roles because predefined roles (pg_monitor, pg_read_all_stats, ...) never are;
+// a missing group role surfaces as an error when the GRANT is executed.
+func validateMemberOf(i int, r Role) error {
+	seen := make(map[string]bool)
+	for j, group := range r.MemberOf {
+		path := fmt.Sprintf("roles[%d].member_of[%d]", i, j)
+		if group == "" {
+			return fmt.Errorf("%s: role name must not be empty", path)
+		}
+		if containsNullByte(group) {
+			return fmt.Errorf("%s: contains null byte", path)
+		}
+		if group == r.Name {
+			return fmt.Errorf("%s: role %q cannot be a member of itself", path, group)
+		}
+		if seen[group] {
+			return fmt.Errorf("%s: duplicate role %q", path, group)
+		}
+		seen[group] = true
+	}
+	return nil
+}
+
+// validateMemberOfCycles rejects circular memberships among roles declared in the config
+// (e.g. a.member_of [b] and b.member_of [a]), which PostgreSQL refuses mid-run. Undeclared
+// group roles (such as predefined roles) have no member_of in this config and cannot close
+// a cycle, so they are ignored. Roles are traversed in config order for deterministic errors.
+func validateMemberOfCycles(roles []Role) error {
+	index := make(map[string]int, len(roles))
+	for i, r := range roles {
+		index[r.Name] = i
+	}
+
+	const (
+		unvisited = iota
+		inProgress
+		done
+	)
+	state := make([]int, len(roles))
+	var stack []string
+
+	var visit func(i int) error
+	visit = func(i int) error {
+		state[i] = inProgress
+		stack = append(stack, roles[i].Name)
+		for j, group := range roles[i].MemberOf {
+			k, declared := index[group]
+			if !declared {
+				continue
+			}
+			switch state[k] {
+			case inProgress:
+				cycle := append([]string{}, stack[slices.Index(stack, group):]...)
+				cycle = append(cycle, group)
+				return fmt.Errorf("roles[%d].member_of[%d]: circular role membership %s",
+					i, j, strings.Join(cycle, " -> "))
+			case unvisited:
+				if err := visit(k); err != nil {
+					return err
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[i] = done
+		return nil
+	}
+
+	for i := range roles {
+		if state[i] == unvisited {
+			if err := visit(i); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // validate checks the config for required fields and consistency.
 func validate(cfg *Config) error {
 	if err := validateStrategy("strategy", cfg.Strategy); err != nil {
@@ -258,6 +343,12 @@ func validate(cfg *Config) error {
 			return fmt.Errorf("roles[%d]: duplicate role name %q", i, r.Name)
 		}
 		roleNames[r.Name] = true
+		if err := validateMemberOf(i, r); err != nil {
+			return err
+		}
+	}
+	if err := validateMemberOfCycles(cfg.Roles); err != nil {
+		return err
 	}
 
 	dbNames := make(map[string]bool)
