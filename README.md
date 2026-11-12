@@ -223,8 +223,10 @@ Each grant sets exactly one target. Privileges are validated per target when the
 
 The `*_in_schema` targets grant on all existing objects and set `ALTER DEFAULT PRIVILEGES`
 for objects created later, both by the provisioning user (e.g. via migrations) and by the
-schema owner (the schema's `owner`, falling back to the database owner). Objects created
-by any other role are not covered by the default privileges.
+schema owner (the schema's `owner`, falling back to the database owner). If neither a
+schema owner nor a database owner is configured, only the provisioning user's default
+privileges are set. Objects created by any other role are not covered by the default
+privileges; they get the grant on the next run.
 
 **Tables with `serial` columns** also need sequence privileges, or inserts fail with
 `permission denied for sequence`. Identity columns (`GENERATED ... AS IDENTITY`) don't:

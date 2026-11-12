@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nested references in defaults (`${A:-${B}}`) are rejected; they are not supported and previously produced wrong values (a literal `${B}` or a stray `}`).
 - `roles[].options.valid_until` now supports `${VAR}` expansion.
 - **Grant privileges are validated per target** — e.g. `SELECT` with `on_database` or `USAGE` with `on_tables_in_schema` is now rejected when the config is loaded, instead of failing partway through provisioning with `invalid privilege type`. Only configs that could never apply successfully are affected.
+- A grant with both an invalid privilege and no (or multiple) targets now reports the target error first, since privileges are validated against the resolved target.
 - Null bytes in `on_schema` / `on_tables_in_schema` are now rejected during validation, like all other identifier fields.
 
 ## [1.3.0] - 2026-07-16
