@@ -123,6 +123,11 @@ databases:
       #   on_tables: ["app.users"]      # specific tables (schema.table), applied after migrations
       #   columns: ["id", "email"]      # optional column-level grant
 
+    # publications:                     # optional: logical replication (CDC); needs wal_level=logical
+    #   - name: "cdc"
+    #     tables: ["app.orders"]        # schema-qualified; or all_tables: true
+    #     publish: ["insert", "update", "delete"]
+
     # migrations:                       # optional: Flyway-style SQL migrations
     #   directory: "./migrations/myapp" # supports ${VAR} expansion
     #                                   # File naming:

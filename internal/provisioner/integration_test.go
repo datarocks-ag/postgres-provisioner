@@ -2141,3 +2141,343 @@ databases:
 		t.Errorf("expected drop-and-recreate hint, logs:\n%s", logs.String())
 	}
 }
+
+// publishedTables returns the sorted schema.table names of a publication.
+func publishedTables(t *testing.T, conn *sql.DB, publication string) string {
+	t.Helper()
+	var tables sql.NullString
+	err := conn.QueryRowContext(context.Background(), `
+		SELECT string_agg(schemaname || '.' || tablename, ',' ORDER BY schemaname, tablename)
+		FROM pg_publication_tables WHERE pubname = $1`, publication).Scan(&tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tables.String
+}
+
+// TestIntegrationPublications provisions publications over tables created by a migration
+// in the same run, checks idempotency, then adds a table by changing the config.
+func TestIntegrationPublications(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t, "-c", "wal_level=logical")
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__tables.sql", `
+CREATE TABLE app.orders (id int PRIMARY KEY);
+CREATE TABLE app.customers (id int PRIMARY KEY);
+`)
+
+	ctx := context.Background()
+	runWithTables := func(tables string) string {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+databases:
+  - name: "cdcdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: %s
+        publish: ["insert", "update", "delete"]
+      - name: "everything"
+        all_tables: true
+`, migrationsDir, tables)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		defer slog.SetDefault(prev)
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+		return logs.String()
+	}
+
+	firstLogs := runWithTables(`["app.orders"]`)
+	if strings.Contains(firstLogs, "wal_level=logical for logical replication") {
+		t.Errorf("unexpected wal_level warning with wal_level=logical, logs:\n%s", firstLogs)
+	}
+
+	cdcDB := connectAs(t, connCfg, connCfg.User, connCfg.Password, "cdcdb")
+	if got := publishedTables(t, cdcDB, "cdc"); got != "app.orders" {
+		t.Fatalf("cdc tables = %q, want app.orders", got)
+	}
+	var truncate, allTables bool
+	if err := cdcDB.QueryRowContext(ctx, `SELECT pubtruncate FROM pg_publication WHERE pubname = 'cdc'`).Scan(&truncate); err != nil {
+		t.Fatal(err)
+	}
+	if truncate {
+		t.Error("expected cdc not to publish truncate")
+	}
+	if err := cdcDB.QueryRowContext(ctx, `SELECT puballtables FROM pg_publication WHERE pubname = 'everything'`).Scan(&allTables); err != nil {
+		t.Fatal(err)
+	}
+	if !allTables {
+		t.Error("expected publication everything to be FOR ALL TABLES")
+	}
+
+	secondLogs := runWithTables(`["app.orders"]`)
+	if strings.Contains(secondLogs, "Adding tables") || strings.Contains(secondLogs, "Updating publication") {
+		t.Errorf("second run should not change publications, logs:\n%s", secondLogs)
+	}
+
+	runWithTables(`["app.orders", "app.customers"]`)
+	if got := publishedTables(t, cdcDB, "cdc"); got != "app.customers,app.orders" {
+		t.Errorf("cdc tables = %q, want app.customers,app.orders", got)
+	}
+}
+
+func TestIntegrationPublicationWalLevelWarning(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t) // default wal_level=replica
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "replicadb"
+    publications:
+      - { name: "everything", all_tables: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background())
+	slog.SetDefault(prev)
+	if err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	if !strings.Contains(logs.String(), "wal_level=replica") {
+		t.Errorf("expected wal_level warning, logs:\n%s", logs.String())
+	}
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "replicadb")
+	var exists bool
+	if err := conn.QueryRowContext(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = 'everything')`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Error("publication should still be created when wal_level is not logical")
+	}
+}
+
+// runProvisioning loads yaml, runs the provisioner with opts and returns the captured logs.
+func runProvisioning(t *testing.T, adminDB *sql.DB, connCfg db.ConnConfig, opts provisioner.Options, yaml string) (string, error) {
+	t.Helper()
+	cfg, err := config.Load(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+	err = provisioner.New(adminDB, connCfg, cfg, opts).Run(context.Background())
+	return logs.String(), err
+}
+
+// TestIntegrationPublicationPartitionedTable verifies that a partitioned table is recognized
+// as already published on the next run. pg_publication_tables lists its leaf partitions
+// instead, which made the second run try to add the table again and fail.
+func TestIntegrationPublicationPartitionedTable(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t, "-c", "wal_level=logical")
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__events.sql", `
+CREATE TABLE app.events (id int, created date) PARTITION BY RANGE (created);
+CREATE TABLE app.events_2026 PARTITION OF app.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+`)
+	yaml := fmt.Sprintf(`
+databases:
+  - name: "partdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: ["app.events"]
+`, migrationsDir)
+
+	for run := 1; run <= 2; run++ {
+		logs, err := runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(), yaml)
+		if err != nil {
+			t.Fatalf("run %d failed: %v\nlogs:\n%s", run, err, logs)
+		}
+		if strings.Contains(logs, "not in config") {
+			t.Errorf("run %d: unexpected extra-table warning, logs:\n%s", run, logs)
+		}
+		if run == 2 && strings.Contains(logs, "Adding tables") {
+			t.Errorf("run 2 should not add tables, logs:\n%s", logs)
+		}
+	}
+
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "partdb")
+	var members string
+	err := conn.QueryRowContext(context.Background(), `
+		SELECT string_agg(c.relname, ',') FROM pg_publication_rel pr
+		JOIN pg_publication p ON p.oid = pr.prpubid
+		JOIN pg_class c ON c.oid = pr.prrelid
+		WHERE p.pubname = 'cdc'`).Scan(&members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if members != "events" {
+		t.Errorf("publication members = %q, want events", members)
+	}
+}
+
+// TestIntegrationPublicationMissingTablesWithMigrationsDisabled verifies that, with
+// migrations disabled, missing tables only warn: the publication is skipped while none
+// exist, created with the existing ones, and completed by a later run.
+func TestIntegrationPublicationMissingTablesWithMigrationsDisabled(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__unused.sql", `SELECT 1;`)
+	yaml := fmt.Sprintf(`
+databases:
+  - name: "appdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: ["app.orders", "app.customers"]
+`, migrationsDir)
+	opts := provisioner.DefaultOptions()
+	opts.MigrationsEnabled = false
+
+	run := func(step string) string {
+		t.Helper()
+		logs, err := runProvisioning(t, adminDB, connCfg, opts, yaml)
+		if err != nil {
+			t.Fatalf("%s: provisioning failed: %v\nlogs:\n%s", step, err, logs)
+		}
+		return logs
+	}
+
+	logs := run("no tables")
+	if !strings.Contains(logs, "none of its tables exist yet") {
+		t.Errorf("expected skip warning, logs:\n%s", logs)
+	}
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "appdb")
+	ctx := context.Background()
+	var exists bool
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = 'cdc')`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("publication should not be created while none of its tables exist")
+	}
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE app.orders (id int PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	logs = run("orders only")
+	if !strings.Contains(logs, "tables=app.customers") {
+		t.Errorf("expected warning naming app.customers, logs:\n%s", logs)
+	}
+	if got := publishedTables(t, conn, "cdc"); got != "app.orders" {
+		t.Fatalf("cdc tables = %q, want app.orders", got)
+	}
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE app.customers (id int PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	run("both tables")
+	if got := publishedTables(t, conn, "cdc"); got != "app.customers,app.orders" {
+		t.Errorf("cdc tables = %q, want app.customers,app.orders", got)
+	}
+}
+
+// TestIntegrationPublicationDrift verifies that a changed publish list is applied to an
+// existing publication, and that an all_tables mismatch only warns: the publication keeps
+// its definition and no tables are added or reported as extra.
+func TestIntegrationPublicationDrift(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t, "-c", "wal_level=logical")
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__tables.sql", `CREATE TABLE app.orders (id int PRIMARY KEY);`)
+	configYAML := func(cdcPublish, everything, listed string) string {
+		return fmt.Sprintf(`
+databases:
+  - name: "driftdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: ["app.orders"]
+        publish: %s
+      - name: "everything"
+        %s
+      - name: "listed"
+        %s
+`, migrationsDir, cdcPublish, everything, listed)
+	}
+
+	logs, err := runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(),
+		configYAML(`["insert", "update", "delete", "truncate"]`, "all_tables: true", `tables: ["app.orders"]`))
+	if err != nil {
+		t.Fatalf("first run failed: %v\nlogs:\n%s", err, logs)
+	}
+
+	// Second run: narrower publish list for cdc; all_tables flipped for the other two.
+	logs, err = runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(),
+		configYAML(`["insert"]`, `tables: ["app.orders"]`, "all_tables: true"))
+	if err != nil {
+		t.Fatalf("second run failed: %v\nlogs:\n%s", err, logs)
+	}
+	if !strings.Contains(logs, "Updating publication operations") {
+		t.Errorf("expected publish update, logs:\n%s", logs)
+	}
+	for _, name := range []string{"everything", "listed"} {
+		warned := false
+		for _, line := range strings.Split(logs, "\n") {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, "all_tables differs from config") &&
+				strings.Contains(line, "publication="+name+" ") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Errorf("expected all_tables warning for %s, logs:\n%s", name, logs)
+		}
+	}
+	if strings.Contains(logs, "Adding tables") || strings.Contains(logs, "not in config") {
+		t.Errorf("all_tables mismatch must not reconcile tables, logs:\n%s", logs)
+	}
+
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "driftdb")
+	ctx := context.Background()
+	var insert, update, del, truncate bool
+	if err := conn.QueryRowContext(ctx,
+		`SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = 'cdc'`,
+	).Scan(&insert, &update, &del, &truncate); err != nil {
+		t.Fatal(err)
+	}
+	if !insert || update || del || truncate {
+		t.Errorf("cdc publish = insert:%v update:%v delete:%v truncate:%v, want insert only", insert, update, del, truncate)
+	}
+	var everythingAll, listedAll bool
+	if err := conn.QueryRowContext(ctx, `SELECT
+		(SELECT puballtables FROM pg_publication WHERE pubname = 'everything'),
+		(SELECT puballtables FROM pg_publication WHERE pubname = 'listed')`).Scan(&everythingAll, &listedAll); err != nil {
+		t.Fatal(err)
+	}
+	if !everythingAll || listedAll {
+		t.Errorf("puballtables changed: everything=%v listed=%v, want true/false", everythingAll, listedAll)
+	}
+}

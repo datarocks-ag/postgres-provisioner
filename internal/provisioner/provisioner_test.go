@@ -3346,3 +3346,449 @@ func TestCheckPreloadLibrariesSkippedWhenShowFails(t *testing.T) {
 		t.Errorf("expected 1 info log about the skipped check, got %d:\n%s", n, logs.String())
 	}
 }
+
+const (
+	publicationQuery       = `SELECT puballtables, pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = \$1`
+	publicationTablesQuery = `SELECT n\.nspname, c\.relname\s+FROM pg_publication_rel pr`
+)
+
+func expectPublicationMissing(mock sqlmock.Sqlmock, name string) {
+	mock.ExpectQuery(publicationQuery).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows([]string{"puballtables", "pubinsert", "pubupdate", "pubdelete", "pubtruncate"}))
+}
+
+func expectPublication(mock sqlmock.Sqlmock, name string, allTables bool, ops [4]bool, tables ...[2]string) {
+	mock.ExpectQuery(publicationQuery).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows([]string{"puballtables", "pubinsert", "pubupdate", "pubdelete", "pubtruncate"}).
+			AddRow(allTables, ops[0], ops[1], ops[2], ops[3]))
+	if allTables {
+		return
+	}
+	rows := sqlmock.NewRows([]string{"nspname", "relname"})
+	for _, t := range tables {
+		rows.AddRow(t[0], t[1])
+	}
+	mock.ExpectQuery(publicationTablesQuery).WithArgs(name).WillReturnRows(rows)
+}
+
+func expectTableExists(mock sqlmock.Sqlmock, quoted string, exists bool) {
+	row := sqlmock.NewRows([]string{"to_regclass"})
+	if exists {
+		row.AddRow(quoted)
+	} else {
+		row.AddRow(nil)
+	}
+	mock.ExpectQuery(toRegclassQuery).WithArgs(quoted).WillReturnRows(row)
+}
+
+var allOps = [4]bool{true, true, true, true}
+
+func TestEnsurePublicationCreate(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublicationMissing(mock, "cdc")
+	expectTableExists(mock, `"app"."orders"`, true)
+	expectTableExists(mock, `"billing"."invoices"`, true)
+	expectRelationKind(mock, `"app"."orders"`, "r")
+	expectRelationKind(mock, `"billing"."invoices"`, "p")
+	mock.ExpectExec(`^CREATE PUBLICATION "cdc" FOR TABLE "app"\."orders", "billing"\."invoices" WITH \(publish = 'insert, update'\)$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "billing.invoices"}, Publish: []string{"update", "insert"}}
+	if err := p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsurePublicationCreateAllTables(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublicationMissing(mock, "all")
+	mock.ExpectExec(`^CREATE PUBLICATION "all" FOR ALL TABLES$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	if err := p.ensurePublication(context.Background(), mockDB, config.Publication{Name: "all", AllTables: true}, "update", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsurePublicationAddsMissingTableOnlyAndKeepsExtra(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	// Published: app.orders (configured) and app.legacy (not configured — kept).
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"}, [2]string{"app", "legacy"})
+	expectTableExists(mock, `"app"."customers"`, true)
+	expectRelationKind(mock, `"app"."customers"`, "r")
+	mock.ExpectExec(`^ALTER PUBLICATION "cdc" ADD TABLE "app"\."customers"$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	var logs strings.Builder
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+
+	p := &Provisioner{}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.customers"}}
+	if err := p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "app.legacy") {
+		t.Errorf("expected warning about extra table app.legacy, logs:\n%s", logs.String())
+	}
+}
+
+func TestEnsurePublicationPublishDrift(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"})
+	mock.ExpectExec(`^ALTER PUBLICATION "cdc" SET \(publish = 'insert, update, delete'\)$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders"}, Publish: []string{"insert", "update", "delete"}}
+	if err := p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnsurePublicationAllTablesMismatchWarns: all_tables can't be altered, so a mismatch in
+// either direction only warns; tables are not reconciled, while publish drift still is.
+func TestEnsurePublicationAllTablesMismatchWarns(t *testing.T) {
+	tests := []struct {
+		name      string
+		installed bool
+		pub       config.Publication
+	}{
+		{"installed all tables, configured list", true,
+			config.Publication{Name: "cdc", Tables: []string{"app.orders"}, Publish: []string{"insert"}}},
+		{"installed list, configured all tables", false,
+			config.Publication{Name: "cdc", AllTables: true, Publish: []string{"insert"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+
+			expectPublication(mock, "cdc", tt.installed, allOps, [2]string{"app", "legacy"})
+			// No to_regclass / relkind lookups and no ADD TABLE: tables aren't reconciled.
+			mock.ExpectExec(`^ALTER PUBLICATION "cdc" SET \(publish = 'insert'\)$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+			logs := captureLogs(t)
+			p := &Provisioner{opts: DefaultOptions()}
+			if err := p.ensurePublication(context.Background(), mockDB, tt.pub, "update", migrationsRan); err != nil {
+				t.Fatalf("ensurePublication: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), "level=WARN msg=\"Publication all_tables differs from config") {
+				t.Errorf("expected all_tables warning, logs:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), "not in config") || strings.Contains(logs.String(), "tables up to date") {
+				t.Errorf("tables must not be reconciled, logs:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+func TestEnsurePublicationUpToDateIsNoOp(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"})
+
+	p := &Provisioner{}
+	if err := p.ensurePublication(context.Background(), mockDB, config.Publication{Name: "cdc", Tables: []string{"app.orders"}}, "update", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsurePublicationMissingTableFails(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublicationMissing(mock, "cdc")
+	expectTableExists(mock, `"app"."ghost"`, false)
+	expectNoCaseInsensitiveMatch(mock, "app", "ghost")
+
+	p := &Provisioner{opts: DefaultOptions()}
+	err = p.ensurePublication(context.Background(), mockDB, config.Publication{Name: "cdc", Tables: []string{"app.ghost"}}, "update", migrationsRan)
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost (checked after this run's migrations") {
+		t.Fatalf("expected missing table error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectNoCaseInsensitiveMatch(mock sqlmock.Sqlmock, schema, name string) {
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs(schema, name).
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
+}
+
+// TestDryRunPublicationMissingTableDoesNotFail: in dry-run the migrations were only
+// previewed, so a missing table is logged and the full CREATE is previewed.
+func TestDryRunPublicationMissingTableDoesNotFail(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublicationMissing(mock, "cdc")
+	expectTableExists(mock, `"app"."future"`, false)
+	expectNoCaseInsensitiveMatch(mock, "app", "future")
+	// No CREATE PUBLICATION is executed in dry-run.
+
+	logs := captureLogs(t)
+	p := &Provisioner{opts: dryRunOptions()}
+	if err := p.ensurePublication(context.Background(), mockDB, config.Publication{Name: "cdc", Tables: []string{"app.future"}}, "update", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "a real run fails unless pending migrations create them") ||
+		!strings.Contains(logs.String(), `CREATE PUBLICATION \"cdc\" FOR TABLE \"app\".\"future\"`) {
+		t.Errorf("expected dry-run notice and CREATE preview, logs:\n%s", logs.String())
+	}
+}
+
+// TestEnsurePublicationCreateSkipsMissingTablesWhenMigrationsDidNotRun: without migrations
+// in this run, missing tables only warn and the publication is created with the others.
+func TestEnsurePublicationCreateSkipsMissingTablesWhenMigrationsDidNotRun(t *testing.T) {
+	for _, migrations := range []migrationStatus{migrationsDisabled, migrationsNotConfigured} {
+		t.Run(missingTablesReason(migrations), func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+
+			expectPublicationMissing(mock, "cdc")
+			expectTableExists(mock, `"app"."orders"`, true)
+			expectTableExists(mock, `"app"."later"`, false)
+			expectRelationKind(mock, `"app"."orders"`, "r")
+			expectNoCaseInsensitiveMatch(mock, "app", "later")
+			mock.ExpectExec(`^CREATE PUBLICATION "cdc" FOR TABLE "app"\."orders"$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+			logs := captureLogs(t)
+			p := &Provisioner{opts: DefaultOptions()}
+			pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.later"}}
+			if err := p.ensurePublication(context.Background(), mockDB, pub, "update", migrations); err != nil {
+				t.Fatalf("ensurePublication: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), "level=WARN msg=\"Skipping publication tables that don't exist yet") ||
+				!strings.Contains(logs.String(), "tables=app.later") {
+				t.Errorf("expected warning naming app.later, logs:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+func TestEnsurePublicationCreateSkippedWhenNoTableExists(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublicationMissing(mock, "cdc")
+	expectTableExists(mock, `"app"."later"`, false)
+	expectNoCaseInsensitiveMatch(mock, "app", "later")
+	// No CREATE PUBLICATION: a publication without tables would have to be altered later.
+
+	logs := captureLogs(t)
+	p := &Provisioner{opts: DefaultOptions()}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.later"}}
+	if err := p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsDisabled); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "Skipping publication: none of its tables exist yet") {
+		t.Errorf("expected skip warning, logs:\n%s", logs.String())
+	}
+}
+
+// TestEnsurePublicationAddsOnlyExistingTablesWhenMigrationsDidNotRun: when altering, only
+// the existing unpublished tables are added; a missing one is warned about.
+func TestEnsurePublicationAddsOnlyExistingTablesWhenMigrationsDidNotRun(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"})
+	expectTableExists(mock, `"app"."invoices"`, true)
+	expectTableExists(mock, `"app"."later"`, false)
+	expectRelationKind(mock, `"app"."invoices"`, "r")
+	expectNoCaseInsensitiveMatch(mock, "app", "later")
+	mock.ExpectExec(`^ALTER PUBLICATION "cdc" ADD TABLE "app"\."invoices"$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	logs := captureLogs(t)
+	p := &Provisioner{opts: DefaultOptions()}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.invoices", "app.later"}}
+	if err := p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsNotConfigured); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "tables=app.later") {
+		t.Errorf("expected warning naming app.later, logs:\n%s", logs.String())
+	}
+}
+
+func TestEnsurePublicationMissingTableToAddFailsAfterMigrations(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"})
+	expectTableExists(mock, `"app"."Later"`, false)
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "Later").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}).AddRow("app", "later"))
+	// No ALTER PUBLICATION.
+
+	p := &Provisioner{opts: DefaultOptions()}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.Later"}}
+	err = p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsRan)
+	if err == nil || !strings.Contains(err.Error(), "app.Later (did you mean app.later?)") {
+		t.Fatalf("expected missing table error with hint, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsurePublicationCreateStrategySkipsExisting(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, [4]bool{true, false, false, false}, [2]string{"app", "orders"})
+	// No ALTER with strategy=create, even though publish and tables differ.
+
+	p := &Provisioner{}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.more"}}
+	if err := p.ensurePublication(context.Background(), mockDB, pub, "create", migrationsRan); err != nil {
+		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsurePublicationRejectsNonTableRelations(t *testing.T) {
+	tests := []struct {
+		kind, want string
+	}{
+		{"v", "app.target is a view"},
+		{"m", "app.target is a materialized view"},
+		{"f", "app.target is a foreign table"},
+		{"i", "app.target is an index"},
+		{"S", "app.target is a sequence"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+
+			expectPublicationMissing(mock, "cdc")
+			expectTableExists(mock, `"app"."orders"`, true)
+			expectTableExists(mock, `"app"."target"`, true)
+			expectRelationKind(mock, `"app"."orders"`, "r")
+			expectRelationKind(mock, `"app"."target"`, tt.kind)
+			// No CREATE PUBLICATION.
+
+			p := &Provisioner{opts: DefaultOptions()}
+			pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.target"}}
+			err = p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsRan)
+			if err == nil || !strings.Contains(err.Error(), tt.want) ||
+				!strings.Contains(err.Error(), "publications support only tables and partitioned tables") {
+				t.Fatalf("expected relation kind error containing %q, got %v", tt.want, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestEnsurePublicationRejectsViewBeforeAltering: a view among the tables to add fails the
+// run before the publish drift is applied, so the publication is left unchanged.
+func TestEnsurePublicationRejectsViewBeforeAltering(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"})
+	expectTableExists(mock, `"app"."order_summary"`, true)
+	expectRelationKind(mock, `"app"."order_summary"`, "v")
+	// No ALTER PUBLICATION ... SET (publish = ...) despite the drift.
+
+	p := &Provisioner{opts: DefaultOptions()}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.order_summary"}, Publish: []string{"insert"}}
+	err = p.ensurePublication(context.Background(), mockDB, pub, "update", migrationsRan)
+	if err == nil || !strings.Contains(err.Error(), "app.order_summary is a view") {
+		t.Fatalf("expected view error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

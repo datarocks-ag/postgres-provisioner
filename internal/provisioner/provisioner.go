@@ -83,7 +83,7 @@ func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Option
 
 // Run executes the full provisioning sequence:
 // Roles (+ settings) -> Role memberships -> Databases (+ settings) -> (per-db) shared_preload_libraries
-// check -> Schemas -> Extensions -> Revokes -> Grants -> Migrations -> Object grants
+// check -> Schemas -> Extensions -> Revokes -> Grants -> Migrations -> Object grants -> Publications
 func (p *Provisioner) Run(ctx context.Context) error {
 	p.preload = preloadState{}
 	if p.opts.DryRun {
@@ -151,6 +151,7 @@ func (p *Provisioner) Run(ctx context.Context) error {
 				"revokes", len(database.Revokes),
 				"grants", len(database.Grants),
 				"migrations", database.Migrations != nil && database.Migrations.Directory != "",
+				"publications", len(database.Publications),
 			)
 			continue
 		}
@@ -240,6 +241,16 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		}
 		if err := p.grantOnTables(ctx, dbConn, grant, migrations); err != nil {
 			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
+		}
+	}
+
+	// 10. Publications — after migrations, which usually create the published tables
+	if len(database.Publications) > 0 {
+		p.warnIfWalLevelNotLogical(ctx, dbConn, database)
+	}
+	for _, pub := range database.Publications {
+		if err := p.ensurePublication(ctx, dbConn, pub, dbStrategy, migrations); err != nil {
+			return fmt.Errorf("provisioning publication %q in database %q: %w", pub.Name, database.Name, err)
 		}
 	}
 
