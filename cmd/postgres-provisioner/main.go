@@ -100,6 +100,10 @@ func main() {
 }
 
 func setupLogging() {
+	// Install the JSON handler before resolving LOG_LEVEL: resolving it can fail (e.g.
+	// both LOG_LEVEL and LOG_LEVEL_FILE set) and that error must be logged as JSON too.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	level := slog.LevelInfo
 	switch envOrDefault("LOG_LEVEL", "info") {
 	case "debug":
