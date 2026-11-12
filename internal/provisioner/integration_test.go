@@ -907,3 +907,40 @@ roles:
 		t.Fatalf("ping as file_secret_user: %v", err)
 	}
 }
+
+// TestIntegrationRolePasswordWithEscapedReference provisions a role whose password
+// contains a literal "${" written as the "$${" escape, and logs in with it.
+func TestIntegrationRolePasswordWithEscapedReference(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfgPath := writeTestConfig(t, `
+roles:
+  - name: "escaped_pw_user"
+    password: "pa$${not_a_var}ss"
+    options:
+      login: true
+`)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	userCfg := connCfg
+	userCfg.User = "escaped_pw_user"
+	userCfg.Password = "pa${not_a_var}ss"
+	userDB, err := db.Connect(ctx, userCfg)
+	if err != nil {
+		t.Fatalf("connect with unescaped password: %v", err)
+	}
+	defer userDB.Close()
+
+	if err := userDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping as escaped_pw_user: %v", err)
+	}
+}
