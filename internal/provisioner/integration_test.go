@@ -71,6 +71,8 @@ func setupPostgres(t *testing.T) (*sql.DB, db.ConnConfig, func()) {
 		Port:     mappedPort.Port(),
 		DBName:   "postgres",
 		SSLMode:  "disable",
+		// As in main: protect provisioner sessions from managed role/database settings.
+		SessionParams: db.SafeSessionParams(),
 	}
 
 	cleanup := func() {
@@ -1661,6 +1663,7 @@ func showSettingAs(t *testing.T, connCfg db.ConnConfig, user, password, dbName, 
 	t.Helper()
 	cfg := connCfg
 	cfg.User, cfg.Password, cfg.DBName = user, password, dbName
+	cfg.SessionParams = nil // observe the defaults as an application session would
 	conn, err := db.Connect(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("connect as %s: %v", user, err)
@@ -1787,6 +1790,75 @@ roles:
       statement_timeout: null`)
 	if got := storedSettings(); got != "" {
 		t.Errorf("null should reset statement_timeout, got %q", got)
+	}
+}
+
+func TestIntegrationDatabaseSettingsDoNotAffectProvisionerSession(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// Without the provisioner's session overrides, these database defaults would make
+	// CREATE SCHEMA and the migrations fail (read-only) or time out (pg_sleep).
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"SELECT pg_sleep(0.05); CREATE TABLE items (id int);")
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+databases:
+  - name: "guarded"
+    owner: "app"
+    settings:
+      default_transaction_read_only: "on"
+      statement_timeout: "10ms"
+      lock_timeout: "10ms"
+      idle_in_transaction_session_timeout: "10ms"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+`, migDir))
+
+	ctx := context.Background()
+	run := func(name string) {
+		t.Helper()
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("%s run failed: %v", name, err)
+		}
+	}
+	run("first")
+
+	// Second run with a new migration: the settings are now in effect from the start.
+	writeMigrationFile(t, migDir, "V0002__more_items.sql",
+		"SELECT pg_sleep(0.05); CREATE TABLE more_items (id int);")
+	run("second")
+
+	// Application sessions still get the database defaults.
+	if got := showSettingAs(t, connCfg, "app", "apppass", "guarded", "default_transaction_read_only"); got != "on" {
+		t.Errorf("SHOW default_transaction_read_only = %q, want on", got)
+	}
+	if got := showSettingAs(t, connCfg, "app", "apppass", "guarded", "statement_timeout"); got != "10ms" {
+		t.Errorf("SHOW statement_timeout = %q, want 10ms", got)
+	}
+
+	guarded, err := db.ConnectToDatabase(ctx, connCfg, "guarded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guarded.Close()
+	var tables int
+	if err := guarded.QueryRowContext(ctx,
+		`SELECT count(*) FROM pg_tables WHERE tablename IN ('items', 'more_items')`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 2 {
+		t.Errorf("expected both migration tables, found %d", tables)
 	}
 }
 

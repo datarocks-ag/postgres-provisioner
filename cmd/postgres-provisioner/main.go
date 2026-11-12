@@ -44,6 +44,8 @@ func main() {
 		Port:     envOrDefault("POSTGRES_PORT", "5432"),
 		DBName:   envOrDefault("POSTGRES_DB", "postgres"),
 		SSLMode:  envOrDefault("POSTGRES_SSLMODE", "disable"),
+		// Role/database settings the provisioner manages also apply to its own sessions.
+		SessionParams: db.SafeSessionParams(),
 	}
 
 	configPath := envOrDefault("PGHELPER_CONFIG_PATH", "./config.yaml")

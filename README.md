@@ -155,6 +155,14 @@ databases:
   `prefix.` for custom parameters). Whether PostgreSQL accepts a parameter for a role or
   database (e.g. `shared_buffers` can't be set per role) is only checked when it's applied.
 - With `strategy: create`, settings are only applied to newly created roles/databases.
+- Settings also apply to the provisioner's own sessions (it reconnects to each database as
+  the admin user). To keep them from breaking schema creation or migrations, every
+  provisioner connection starts with `statement_timeout=0`, `lock_timeout=0`,
+  `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off`
+  (connection startup options, which take precedence over role and database defaults).
+  `search_path` is deliberately not overridden: a database `search_path`, or one set for
+  the admin user, changes how unqualified names in migrations resolve. Schema-qualify
+  names in migrations or `SET search_path` at their top if that matters.
 
 ## Environment Variables
 

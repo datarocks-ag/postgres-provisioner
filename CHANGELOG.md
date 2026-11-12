@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Null bytes in `on_schema` / `on_tables_in_schema` are now rejected during validation, like all other identifier fields.
 - **`ALL` can no longer be combined with other privileges** in the same grant or revoke (e.g. `[ALL, SELECT]`). PostgreSQL rejects such a `GRANT` with a syntax error, so these configs could never apply; they now fail at load time with a path-qualified error.
 - **Role and database settings** — `roles[].settings` (`ALTER ROLE ... SET`), `databases[].settings` (`ALTER DATABASE ... SET`) and `databases[].role_settings` (`ALTER ROLE ... IN DATABASE ... SET`) set run-time parameter defaults such as `statement_timeout` or `search_path`. Lists are quoted per element (needed for `search_path`), an explicit `null` resets a setting (an empty value or `~` is rejected), and removing a setting from the config leaves it untouched. Current values are read from `pg_db_role_setting`, so unchanged settings are skipped. Supports dry-run and `${VAR}` expansion in values; `strategy: create` skips settings for existing roles/databases.
+- **Provisioner sessions ignore risky role/database defaults** — every provisioner connection sets `statement_timeout=0`, `lock_timeout=0`, `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off` as connection startup options, so settings such as a read-only database default or a short `statement_timeout` can't break schema creation or migrations. `search_path` is not overridden.
 
 ## [1.3.0] - 2026-07-16
 
