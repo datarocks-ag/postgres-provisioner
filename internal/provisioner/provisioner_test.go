@@ -1826,3 +1826,107 @@ func TestRunCreateStrategyGrantsMembershipsForNewRole(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGrantOnSequencesInSchema(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{Role: "app", Privileges: []string{"USAGE", "SELECT"}, OnSequencesInSchema: "app"}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "app" TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT USAGE, SELECT ON SEQUENCES TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "appowner" IN SCHEMA "app" GRANT USAGE, SELECT ON SEQUENCES TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	p := &Provisioner{}
+	database := config.Database{Name: "mydb", Owner: "appowner"}
+	if err := p.applyGrant(context.Background(), mockDB, database, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnFunctionsInSchema(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{Role: "app", Privileges: []string{"EXECUTE"}, OnFunctionsInSchema: "app"}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`GRANT EXECUTE ON ALL ROUTINES IN SCHEMA "app" TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT EXECUTE ON FUNCTIONS TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES FOR ROLE "fnowner" IN SCHEMA "app" GRANT EXECUTE ON FUNCTIONS TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	p := &Provisioner{}
+	database := config.Database{
+		Name:    "mydb",
+		Owner:   "dbowner",
+		Schemas: []config.Schema{{Name: "app", Owner: "fnowner"}},
+	}
+	if err := p.applyGrant(context.Background(), mockDB, database, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnSequencesInSchemaDefaultPrivErrorRollsBack(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	grant := config.Grant{Role: "app", Privileges: []string{"USAGE"}, OnSequencesInSchema: "app"}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`GRANT USAGE ON ALL SEQUENCES IN SCHEMA "app" TO "app"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER DEFAULT PRIVILEGES IN SCHEMA "app" GRANT USAGE ON SEQUENCES TO "app"`).
+		WillReturnError(fmt.Errorf("boom"))
+	mock.ExpectRollback()
+
+	p := &Provisioner{}
+	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
+	if err == nil || !strings.Contains(err.Error(), "alter default privileges") {
+		t.Fatalf("expected default privileges error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunGrantOnSequencesSkipsTransaction(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	// No expectations: dry-run must neither begin a transaction nor execute.
+
+	grant := config.Grant{Role: "app", Privileges: []string{"USAGE"}, OnSequencesInSchema: "app"}
+	p := &Provisioner{opts: dryRunOptions()}
+	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb", Owner: "o"}, grant); err != nil {
+		t.Fatalf("applyGrant: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

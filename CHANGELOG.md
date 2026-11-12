@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Role memberships (`member_of`)** — `roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`), including PostgreSQL predefined roles such as `pg_monitor`. This enables a least-privilege, non-superuser account for `postgres_exporter` instead of the admin user. Memberships are applied in a separate pass after all roles are provisioned (config order doesn't matter), already-granted memberships are skipped, nothing is ever revoked, and `strategy: create` skips memberships for pre-existing roles. Circular memberships among declared roles are rejected at validation. Supported in dry-run mode.
+- **`*_FILE` secret support** — every `${VAR}` reference falls back to the contents of the file named by `VAR_FILE` (Docker secrets / Kubernetes secret volumes; trailing newlines trimmed, max 64 KiB). The provisioner's own environment variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, …) accept `<NAME>_FILE` as well. Setting both `VAR` and `VAR_FILE` is an error.
+- **Default values** — `${VAR:-default}` uses `default` when the variable is unset or empty (POSIX/Docker Compose semantics); `${VAR:-}` marks a value as optional.
+- **Escape for a literal `${`** — `$${` yields `${` without expansion or validation (e.g. a password containing `${`).
+- **Sequence and function grants** — new grant targets `on_sequences_in_schema` (`GRANT ... ON ALL SEQUENCES IN SCHEMA` + `ALTER DEFAULT PRIVILEGES ... ON SEQUENCES`) and `on_functions_in_schema` (`ON ALL ROUTINES`, covering functions and procedures, + default privileges `ON FUNCTIONS`). Like `on_tables_in_schema`, both run transactionally and cover objects created later by the provisioning user and the schema owner. Sequence grants are required for `INSERT` into tables with `serial` columns.
+
 ### Changed
 
 - **BREAKING: unresolved `${VAR}` references now fail config loading.** Previously an unset variable was left in place as literal text, so e.g. a missing `APP_DB_PASSWORD` silently set the role's password to the string `${APP_DB_PASSWORD}`. Loading now fails and reports every unresolved reference with its config path. Migration: for values that are intentionally optional, use `${VAR:-}` or `${VAR:-default}`. Role passwords are the exception, because they must not resolve to empty (see below): either omit the `password` field or provide a value.
@@ -16,13 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Invalid references such as `${foo bar}` or `${}` are now errors instead of being left as literal text.
 - Nested references in defaults (`${A:-${B}}`) are rejected; they are not supported and previously produced wrong values (a literal `${B}` or a stray `}`).
 - `roles[].options.valid_until` now supports `${VAR}` expansion.
-
-### Added
-
-- **Role memberships (`member_of`)** — `roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`), including PostgreSQL predefined roles such as `pg_monitor`. This enables a least-privilege, non-superuser account for `postgres_exporter` instead of the admin user. Memberships are applied in a separate pass after all roles are provisioned (config order doesn't matter), already-granted memberships are skipped, nothing is ever revoked, and `strategy: create` skips memberships for pre-existing roles. Circular memberships among declared roles are rejected at validation. Supported in dry-run mode.
-- **`*_FILE` secret support** — every `${VAR}` reference falls back to the contents of the file named by `VAR_FILE` (Docker secrets / Kubernetes secret volumes; trailing newlines trimmed, max 64 KiB). The provisioner's own environment variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, …) accept `<NAME>_FILE` as well. Setting both `VAR` and `VAR_FILE` is an error.
-- **Default values** — `${VAR:-default}` uses `default` when the variable is unset or empty (POSIX/Docker Compose semantics); `${VAR:-}` marks a value as optional.
-- **Escape for a literal `${`** — `$${` yields `${` without expansion or validation (e.g. a password containing `${`).
+- **Grant privileges are validated per target** — e.g. `SELECT` with `on_database` or `USAGE` with `on_tables_in_schema` is now rejected when the config is loaded, instead of failing partway through provisioning with `invalid privilege type`. Only configs that could never apply successfully are affected.
+- A grant with both an invalid privilege and no (or multiple) targets now reports the target error first, since privileges are validated against the resolved target.
+- Null bytes in `on_schema` / `on_tables_in_schema` are now rejected during validation, like all other identifier fields.
 
 ## [1.3.0] - 2026-07-16
 

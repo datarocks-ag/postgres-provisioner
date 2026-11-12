@@ -230,6 +230,9 @@ databases:
     grants:
       - role: "user1"
         privileges: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+        on_tables_in_schema: "public"
+      - role: "user1"
+        privileges: ["CONNECT", "temp"]
         on_database: true
       - role: "user1"
         privileges: ["ALL"]
@@ -851,7 +854,7 @@ databases:
     grants:
       - role: "user1"
         privileges: ["${TEST_PRIV}"]
-        on_database: true
+        on_tables_in_schema: "public"
 `
 	path := writeTempConfig(t, yaml)
 	cfg, err := Load(path)
@@ -1105,5 +1108,113 @@ func TestValidationMemberOfAcyclic(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidationPrivilegeInvalidForTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		grant     string
+		wantError string
+	}{
+		{"SELECT on database", `privileges: ["SELECT"]
+        on_database: true`, `privilege "SELECT" is not valid for on_database`},
+		{"CONNECT on schema", `privileges: ["CONNECT"]
+        on_schema: "app"`, `privilege "CONNECT" is not valid for on_schema`},
+		{"USAGE on tables", `privileges: ["usage"]
+        on_tables_in_schema: "app"`, `privilege "usage" is not valid for on_tables_in_schema`},
+		{"EXECUTE on sequences", `privileges: ["EXECUTE"]
+        on_sequences_in_schema: "app"`, `privilege "EXECUTE" is not valid for on_sequences_in_schema`},
+		{"SELECT on functions", `privileges: ["SELECT"]
+        on_functions_in_schema: "app"`, `privilege "SELECT" is not valid for on_functions_in_schema`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempConfig(t, `
+roles:
+  - name: "user1"
+databases:
+  - name: "db1"
+    grants:
+      - role: "user1"
+        `+tt.grant+`
+`)
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "databases[0].grants[0].privileges[0]: "+tt.wantError) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantError, err)
+			}
+		})
+	}
+}
+
+func TestValidationNullByteInGrantTargets(t *testing.T) {
+	for _, field := range []string{"on_schema", "on_tables_in_schema", "on_sequences_in_schema", "on_functions_in_schema"} {
+		t.Run(field, func(t *testing.T) {
+			cfg := &Config{
+				Roles: []Role{{Name: "user1"}},
+				Databases: []Database{{
+					Name:   "db1",
+					Grants: []Grant{{Role: "user1", Privileges: []string{"ALL"}}},
+				}},
+			}
+			g := &cfg.Databases[0].Grants[0]
+			switch field {
+			case "on_schema":
+				g.OnSchema = "app\x00"
+			case "on_tables_in_schema":
+				g.OnTablesInSchema = "app\x00"
+			case "on_sequences_in_schema":
+				g.OnSequencesInSchema = "app\x00"
+			case "on_functions_in_schema":
+				g.OnFunctionsInSchema = "app\x00"
+			}
+			err := validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), "databases[0].grants[0]."+field+": contains null byte") {
+				t.Fatalf("expected null byte error for %s, got: %v", field, err)
+			}
+		})
+	}
+}
+
+func TestLoadSequenceAndFunctionGrants(t *testing.T) {
+	t.Setenv("GRANT_SCHEMA", "app")
+	path := writeTempConfig(t, `
+roles:
+  - name: "app_user"
+databases:
+  - name: "db1"
+    grants:
+      - role: "app_user"
+        privileges: ["USAGE", "select", "UPDATE"]
+        on_sequences_in_schema: "${GRANT_SCHEMA}"
+      - role: "app_user"
+        privileges: ["EXECUTE"]
+        on_functions_in_schema: "${GRANT_SCHEMA}"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	grants := cfg.Databases[0].Grants
+	if grants[0].OnSequencesInSchema != "app" || grants[1].OnFunctionsInSchema != "app" {
+		t.Errorf("expected expanded schema targets, got %q / %q", grants[0].OnSequencesInSchema, grants[1].OnFunctionsInSchema)
+	}
+}
+
+func TestValidationSequenceGrantCombinedWithOtherTarget(t *testing.T) {
+	path := writeTempConfig(t, `
+roles:
+  - name: "app_user"
+databases:
+  - name: "db1"
+    grants:
+      - role: "app_user"
+        privileges: ["USAGE"]
+        on_schema: "app"
+        on_sequences_in_schema: "app"
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "exactly one of") {
+		t.Fatalf("expected exactly-one-target error, got: %v", err)
 	}
 }
