@@ -1334,6 +1334,25 @@ databases:
 	}
 }
 
+// PostgreSQL accepts quoted role names like "PUBLIC" or "Public", but grants and revokes
+// would send their privileges to the PUBLIC pseudo-role, so any case is rejected.
+func TestValidationRejectsRoleNamedPublic(t *testing.T) {
+	for _, name := range []string{"public", "PUBLIC", "Public"} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTempConfig(t, `
+roles:
+  - name: "app"
+  - name: "`+name+`"
+`)
+			_, err := Load(path)
+			want := fmt.Sprintf(`roles[1].name: %q is reserved`, name)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected error containing %q, got: %v", want, err)
+			}
+		})
+	}
+}
+
 func TestExpandPrivileges(t *testing.T) {
 	tests := []struct {
 		target GrantTarget

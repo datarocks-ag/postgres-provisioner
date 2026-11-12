@@ -259,7 +259,9 @@ databases:
 
 - Same shape as grants. Supported targets: `on_database` and `on_schema`.
 - `role` is a declared role or `PUBLIC` (case-insensitive), the pseudo-role covering every role.
-  New databases grant `CONNECT` and `TEMPORARY` to `PUBLIC` by default.
+  New databases grant `CONNECT` and `TEMPORARY` to `PUBLIC` by default. Because any case means
+  the pseudo-role, declaring a role named `public` in any case (PostgreSQL allows quoted
+  `"PUBLIC"` or `"Public"`) is a config error.
 - Revokes run **before** grants, so revoking from `PUBLIC` and granting to specific roles converges.
 - Only privileges the grantee currently holds are revoked; otherwise the revoke is logged as
   already applied and skipped.

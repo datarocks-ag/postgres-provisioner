@@ -387,8 +387,10 @@ func validateMemberOfCycles(roles []Role) error {
 	return nil
 }
 
-// IsPublic reports whether role is the PUBLIC pseudo-role (case-insensitive).
-// PostgreSQL reserves the name, so no real role can be called "public".
+// IsPublic reports whether role names the PUBLIC pseudo-role (case-insensitive).
+// PostgreSQL only reserves lowercase "public": quoted names such as "PUBLIC" or "Public"
+// are valid roles. validate rejects declaring any of them, so a name matching IsPublic in
+// a grant or revoke always means the pseudo-role.
 func IsPublic(role string) bool {
 	return strings.EqualFold(role, "PUBLIC")
 }
@@ -581,6 +583,9 @@ func validate(cfg *Config) error {
 		}
 		if err := checkNullBytes(nullByteFields...); err != nil {
 			return err
+		}
+		if IsPublic(r.Name) {
+			return fmt.Errorf("roles[%d].name: %q is reserved: grants and revokes treat PUBLIC in any case as the pseudo-role for all roles", i, r.Name)
 		}
 		if r.Options.ConnectionLimit != nil && *r.Options.ConnectionLimit < -1 {
 			return fmt.Errorf("roles[%d].options.connection_limit: must be >= -1, got %d", i, *r.Options.ConnectionLimit)
