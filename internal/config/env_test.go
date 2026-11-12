@@ -174,6 +174,23 @@ databases:
 	}
 }
 
+func TestLoadReportsUnresolvedMemberOfReference(t *testing.T) {
+	path := writeTempConfig(t, `
+roles:
+  - name: "postgres_exporter"
+    member_of: ["${LOAD_MISSING_GROUP}", "pg_monitor"]
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"roles[0].member_of[0]", "LOAD_MISSING_GROUP"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected error to mention %q, got: %v", want, err)
+		}
+	}
+}
+
 func TestLoadRejectsPasswordResolvingToEmpty(t *testing.T) {
 	tests := []struct {
 		name     string
