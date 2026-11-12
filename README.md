@@ -267,8 +267,15 @@ databases:
   already applied and skipped.
 - A privilege both granted and revoked for the same role and object is a config error, as
   are duplicate revokes.
-- `REVOKE` only removes privileges granted by the provisioning user (or the object owner).
-  If a privilege survives because another role granted it, a warning is logged.
+- `REVOKE` only removes grants made by a specific grantor. As a superuser, the provisioner
+  revokes as the object owner, removing the owner's grants (including the defaults). A
+  non-superuser revokes as itself (or as the owner, if it is a member of the owning role) and
+  removes only those grants; for others, PostgreSQL only emits a server `WARNING`, not an
+  error. Either way, if a privilege survives because another grantor granted it, the
+  provisioner logs a warning.
+- Revoking from a role only removes privileges granted to that role directly. The role still
+  has whatever it gets through `PUBLIC` or through membership in other roles: revoke from
+  `PUBLIC` (or from those roles) as well.
 - Revokes never use `CASCADE`. If the grantee holds a privilege `WITH GRANT OPTION` and has
   granted it on to other roles, PostgreSQL rejects the `REVOKE` with "dependent privileges
   exist" and the run fails with a hint. Revoke the dependent grants first (or run
