@@ -13,6 +13,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci"
+    ignore:
+      # Dependabot proposed a non-existent major "v2201" for this action (d0007cb),
+      # which broke the release workflow. Major updates need a manual review.
+      - dependency-name: "vladopajic/go-test-coverage"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /
