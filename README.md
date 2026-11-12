@@ -257,6 +257,10 @@ the same run. A table that still doesn't exist by then fails provisioning with t
 table names (in dry-run it's only logged, since migrations aren't applied). Unlike the
 `*_in_schema` targets they don't set default privileges.
 
+Besides tables (including partitioned tables), `on_tables` accepts **views, materialized
+views and foreign tables**. Other relations such as indexes, sequences or composite types
+are rejected with an error naming their kind (use `on_sequences_in_schema` for sequences).
+
 Table and column names are quoted for you and matched **case-sensitively**: `App.Orders`
 targets `"App"."Orders"`, not `app.orders`. Write them unquoted — names containing `"` are
 rejected at load time. If a table isn't found but exists with different case, the error

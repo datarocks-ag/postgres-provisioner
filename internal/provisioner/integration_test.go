@@ -1534,3 +1534,59 @@ databases:
 		t.Fatalf("expected missing table error, got: %v", err)
 	}
 }
+
+// TestIntegrationTableGrantRelationKinds grants on a view and a materialized view and
+// rejects an index, which to_regclass also resolves.
+func TestIntegrationTableGrantRelationKinds(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__relations.sql", `
+CREATE TABLE app.users (id int PRIMARY KEY);
+CREATE VIEW app.user_ids AS SELECT id FROM app.users;
+CREATE MATERIALIZED VIEW app.user_count AS SELECT count(*) AS n FROM app.users;
+`)
+
+	load := func(onTables string) *config.Config {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+roles:
+  - name: "reporting"
+    password: "reportingpass"
+    options: { login: true }
+
+databases:
+  - name: "objgrantkinds"
+    schemas:
+      - name: "app"
+    grants:
+      - { role: "reporting", privileges: ["USAGE"], on_schema: "app" }
+      - { role: "reporting", privileges: ["SELECT"], on_tables: %s }
+    migrations:
+      directory: %q
+`, onTables, migrationsDir)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	ctx := context.Background()
+	err := provisioner.New(adminDB, connCfg, load(`["app.users_pkey"]`), provisioner.DefaultOptions()).Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "app.users_pkey is an index") {
+		t.Fatalf("expected unsupported relation kind error, got: %v", err)
+	}
+
+	if err := provisioner.New(adminDB, connCfg, load(`["app.user_ids", "app.user_count"]`), provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("granting on views: %v", err)
+	}
+	reportingDB := connectAs(t, connCfg, "reporting", "reportingpass", "objgrantkinds")
+	var n int
+	if err := reportingDB.QueryRowContext(ctx, `SELECT count(*) FROM app.user_ids`).Scan(&n); err != nil {
+		t.Errorf("SELECT on granted view: %v", err)
+	}
+	if err := reportingDB.QueryRowContext(ctx, `SELECT n FROM app.user_count`).Scan(&n); err != nil {
+		t.Errorf("SELECT on granted materialized view: %v", err)
+	}
+}

@@ -2298,7 +2298,14 @@ func TestDryRunRevokeOnNewDatabase(t *testing.T) {
 const (
 	toRegclassQuery         = `SELECT to_regclass\(\$1\)::text`
 	caseInsensitiveMatchSQL = `SELECT n\.nspname, c\.relname FROM pg_class c`
+	relationKindSQL         = `SELECT relkind::text FROM pg_class WHERE oid = to_regclass\(\$1\)`
 )
+
+// expectRelationKind expects the relkind lookup grantOnTables runs for each existing table.
+func expectRelationKind(mock sqlmock.Sqlmock, quotedName, kind string) {
+	mock.ExpectQuery(relationKindSQL).WithArgs(quotedName).
+		WillReturnRows(sqlmock.NewRows([]string{"relkind"}).AddRow(kind))
+}
 
 func TestGrantOnTablesWithColumns(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
@@ -2311,6 +2318,8 @@ func TestGrantOnTablesWithColumns(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
 	mock.ExpectQuery(toRegclassQuery).WithArgs(`"App"."Orders"`).
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(`"App"."Orders"`))
+	expectRelationKind(mock, `"app"."users"`, "r")
+	expectRelationKind(mock, `"App"."Orders"`, "v")
 	mock.ExpectExec(`^GRANT SELECT \("id", "email"\), UPDATE \("id", "email"\) ON TABLE "app"\."users", "App"\."Orders" TO "reporting"$`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -2338,6 +2347,7 @@ func TestGrantOnTablesWithoutColumns(t *testing.T) {
 
 	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
+	expectRelationKind(mock, `"app"."users"`, "p")
 	mock.ExpectExec(`^GRANT SELECT, INSERT ON TABLE "app"\."users" TO "app"$`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -2369,6 +2379,34 @@ func TestGrantOnTablesMissingTableFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost (on_tables") ||
 		!strings.Contains(err.Error(), "names are case-sensitive") {
 		t.Fatalf("expected missing table error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnTablesRejectsUnsupportedRelationKinds(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	for _, name := range []string{`"app"."users_pkey"`, `"app"."point"`, `"app"."users"`} {
+		mock.ExpectQuery(toRegclassQuery).WithArgs(name).
+			WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(name))
+	}
+	expectRelationKind(mock, `"app"."users_pkey"`, "i")
+	expectRelationKind(mock, `"app"."point"`, "c")
+	expectRelationKind(mock, `"app"."users"`, "r")
+	// No GRANT: an unsupported kind fails before any mutation.
+
+	p := &Provisioner{}
+	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users_pkey", "app.point", "app.users"}}
+	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
+	want := "app.users_pkey is an index; app.point is a composite type (on_tables supports tables, partitioned tables, views, materialized views and foreign tables)"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error containing %q, got %v", want, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -2454,6 +2492,7 @@ func TestObjectGrantsRunAfterMigrations(t *testing.T) {
 	mock.ExpectCommit()
 	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
+	expectRelationKind(mock, `"app"."users"`, "r")
 	mock.ExpectExec(`^GRANT SELECT ON TABLE "app"\."users" TO "app"$`).WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{opts: DefaultOptions()}

@@ -29,6 +29,9 @@ func (p *Provisioner) grantOnTables(ctx context.Context, dbConn *sql.DB, grant c
 	if err != nil {
 		return fmt.Errorf("checking tables: %w", err)
 	}
+	if err := checkGrantableRelationKinds(ctx, dbConn, tables, missing); err != nil {
+		return err
+	}
 	if len(missing) > 0 {
 		described, err := describeMissingTables(ctx, dbConn, missing)
 		if err != nil {
@@ -94,6 +97,66 @@ func missingTables(ctx context.Context, dbConn *sql.DB, names []config.Qualified
 		}
 	}
 	return missing, nil
+}
+
+// relationKindQuery returns pg_class.relkind of a relation, or no row if it doesn't exist.
+const relationKindQuery = `SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)`
+
+// relationKind returns the pg_class.relkind of name ("r" table, "v" view, "i" index, ...),
+// or "" if the relation doesn't exist. to_regclass also resolves indexes, sequences and
+// composite types, so callers that need a specific kind must check it.
+func relationKind(ctx context.Context, dbConn *sql.DB, name config.QualifiedName) (string, error) {
+	var kind string
+	err := dbConn.QueryRowContext(ctx, relationKindQuery, quoteQualifiedName(name)).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return kind, err
+}
+
+// grantableRelationKinds are the relkinds GRANT ... ON TABLE applies to as intended:
+// tables, partitioned tables, views, materialized views and foreign tables.
+var grantableRelationKinds = map[string]bool{"r": true, "p": true, "v": true, "m": true, "f": true}
+
+// relationKindNames names the other relkinds for error messages.
+var relationKindNames = map[string]string{
+	"i": "an index",
+	"I": "a partitioned index",
+	"S": "a sequence",
+	"c": "a composite type",
+	"t": "a TOAST table",
+}
+
+// checkGrantableRelationKinds fails if any existing table in tables (those not listed in
+// missing) is a relation kind on_tables doesn't support, such as an index.
+func checkGrantableRelationKinds(ctx context.Context, dbConn *sql.DB, tables []config.QualifiedName, missing []string) error {
+	isMissing := make(map[string]bool, len(missing))
+	for _, m := range missing {
+		isMissing[m] = true
+	}
+	var invalid []string
+	for _, table := range tables {
+		if isMissing[table.String()] {
+			continue
+		}
+		kind, err := relationKind(ctx, dbConn, table)
+		if err != nil {
+			return fmt.Errorf("checking tables: %w", err)
+		}
+		if kind == "" || grantableRelationKinds[kind] {
+			continue
+		}
+		label, ok := relationKindNames[kind]
+		if !ok {
+			label = fmt.Sprintf("a relation of kind %q", kind)
+		}
+		invalid = append(invalid, fmt.Sprintf("%s is %s", table, label))
+	}
+	if len(invalid) > 0 {
+		return fmt.Errorf("%s (on_tables supports tables, partitioned tables, views, materialized views and foreign tables)",
+			strings.Join(invalid, "; "))
+	}
+	return nil
 }
 
 // caseInsensitiveMatchQuery finds a relation whose schema and name match ignoring case.
