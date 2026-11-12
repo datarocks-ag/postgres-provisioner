@@ -148,7 +148,9 @@ databases:
   `search_path` as a YAML list: `search_path: "app, public"` would name a single schema
   called `app, public`. Values support `${VAR}` expansion.
 - Only settings whose stored value differs are changed. Removing a setting from the config
-  leaves it in place (additive); use `null` to reset it explicitly.
+  leaves it in place (additive); use `null` to reset it explicitly. Only the literal
+  `null` resets: an empty value (`work_mem:`) or `~` is rejected as a likely forgotten
+  value, and so are null or empty list elements.
 - Names are case-insensitive and validated (`[A-Za-z_][A-Za-z0-9_$]*`, optionally with a
   `prefix.` for custom parameters). Whether PostgreSQL accepts a parameter for a role or
   database (e.g. `shared_buffers` can't be set per role) is only checked when it's applied.

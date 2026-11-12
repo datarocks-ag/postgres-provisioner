@@ -12,10 +12,14 @@ import (
 // SettingValue is the desired value of a run-time parameter (ALTER ROLE/DATABASE ... SET).
 //
 // In YAML it is a scalar (one value), a sequence (a list setting such as search_path,
-// where every element is quoted separately), or null, which resets the setting.
+// where every element is quoted separately), or an explicit null, which resets the setting.
 type SettingValue struct {
 	// Values holds the value elements. It is nil for a reset (YAML null).
 	Values []string
+
+	// invalid describes why the YAML value was rejected. It is reported by validation,
+	// which knows the config path, instead of by decoding, which only knows the line.
+	invalid string
 }
 
 // IsReset reports whether the setting should be reset (YAML null).
@@ -23,8 +27,8 @@ func (v SettingValue) IsReset() bool {
 	return v.Values == nil
 }
 
-// UnmarshalYAML accepts a scalar or a sequence of scalars. yaml.v3 does not call it for
-// null values, which therefore decode to the zero SettingValue, i.e. a reset.
+// UnmarshalYAML accepts a scalar or a sequence of non-null scalars. Null values never
+// reach it (yaml.v3 skips UnmarshalYAML for them); Settings.UnmarshalYAML handles those.
 func (v *SettingValue) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
@@ -36,6 +40,9 @@ func (v *SettingValue) UnmarshalYAML(node *yaml.Node) error {
 			if item.Kind != yaml.ScalarNode {
 				return fmt.Errorf("line %d: list setting values must be scalars", item.Line)
 			}
+			if isNullNode(item) {
+				v.invalid = "list elements must not be null or empty"
+			}
 			v.Values = append(v.Values, item.Value)
 		}
 		return nil
@@ -46,6 +53,55 @@ func (v *SettingValue) UnmarshalYAML(node *yaml.Node) error {
 
 // Settings maps run-time parameter names to their desired values.
 type Settings map[string]SettingValue
+
+// UnmarshalYAML decodes a settings mapping. It inspects null values itself because only
+// an explicit `null` means reset: an empty value (`work_mem:`) or `~` is more likely a
+// forgotten value, and silently resetting the setting would be surprising.
+func (s *Settings) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: settings must be a mapping", node.Line)
+	}
+	settings := make(Settings, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keyNode, valueNode := node.Content[i], node.Content[i+1]
+		var name string
+		if err := keyNode.Decode(&name); err != nil {
+			return err
+		}
+		if _, dup := settings[name]; dup {
+			return fmt.Errorf("line %d: setting %q is defined more than once", keyNode.Line, name)
+		}
+
+		var value SettingValue
+		switch {
+		case isNullNode(valueNode) && isExplicitNull(valueNode):
+			// Zero value: a reset.
+		case isNullNode(valueNode):
+			value.invalid = "value is empty (use null to reset the setting)"
+		default:
+			if err := valueNode.Decode(&value); err != nil {
+				return err
+			}
+		}
+		settings[name] = value
+	}
+	*s = settings
+	return nil
+}
+
+// isNullNode reports whether node is a YAML null: empty, `~`, or `null`.
+func isNullNode(node *yaml.Node) bool {
+	return node.Kind == yaml.ScalarNode && node.ShortTag() == "!!null"
+}
+
+// isExplicitNull reports whether a null node is spelled out as the word null.
+func isExplicitNull(node *yaml.Node) bool {
+	switch node.Value {
+	case "null", "Null", "NULL":
+		return true
+	}
+	return false
+}
 
 // SortedNames returns the setting names sorted case-insensitively (PostgreSQL parameter
 // names are case-insensitive), so generated SQL is deterministic.
@@ -92,6 +148,9 @@ func validateSettings(path string, settings Settings) error {
 			return fmt.Errorf("%s: settings %q and %q refer to the same parameter", path, other, name)
 		}
 		seen[lower] = name
+		if value.invalid != "" {
+			return fmt.Errorf("%s.%s: %s", path, name, value.invalid)
+		}
 		if value.Values != nil && len(value.Values) == 0 {
 			return fmt.Errorf("%s.%s: list must not be empty (use null to reset)", path, name)
 		}

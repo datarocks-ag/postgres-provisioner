@@ -16,6 +16,8 @@ roles:
       jit: false
       search_path: ["app", "$user", "public"]
       lock_timeout: null
+      idle_in_transaction_session_timeout: NULL
+      app.empty: ""
 databases:
   - name: "db1"
     settings:
@@ -40,8 +42,11 @@ databases:
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
-	if !s["lock_timeout"].IsReset() {
-		t.Error("expected null lock_timeout to be a reset")
+	if !s["lock_timeout"].IsReset() || !s["idle_in_transaction_session_timeout"].IsReset() {
+		t.Error("expected explicit null to be a reset")
+	}
+	if got := s["app.empty"].Values; len(got) != 1 || got[0] != "" {
+		t.Errorf("expected quoted empty string to be a value, got %v", got)
 	}
 	if s["statement_timeout"].IsReset() {
 		t.Error("expected statement_timeout not to be a reset")
@@ -102,6 +107,73 @@ roles:
     settings:
       work_mem: { a: 1 }`,
 			wantErr: "setting value must be a scalar, a list or null",
+		},
+		{
+			name: "empty value is not a reset",
+			yaml: `
+roles:
+  - name: "app"
+    settings:
+      work_mem:
+      statement_timeout: "30s"`,
+			wantErr: "roles[0].settings.work_mem: value is empty (use null to reset the setting)",
+		},
+		{
+			name: "tilde is not a reset",
+			yaml: `
+databases:
+  - name: "db1"
+    settings:
+      work_mem: ~`,
+			wantErr: "databases[0].settings.work_mem: value is empty",
+		},
+		{
+			name: "empty value in role_settings",
+			yaml: `
+roles:
+  - name: "app"
+databases:
+  - name: "db1"
+    role_settings:
+      app:
+        work_mem:`,
+			wantErr: "databases[0].role_settings.app.work_mem: value is empty",
+		},
+		{
+			name: "null list element",
+			yaml: `
+roles:
+  - name: "app"
+    settings:
+      search_path: [app, ~]`,
+			wantErr: "roles[0].settings.search_path: list elements must not be null or empty",
+		},
+		{
+			name: "explicit null list element",
+			yaml: `
+roles:
+  - name: "app"
+    settings:
+      search_path: [app, null]`,
+			wantErr: "roles[0].settings.search_path: list elements must not be null or empty",
+		},
+		{
+			name: "duplicate setting",
+			yaml: `
+roles:
+  - name: "app"
+    settings:
+      work_mem: "1MB"
+      work_mem: "2MB"`,
+			wantErr: `setting "work_mem" is defined more than once`,
+		},
+		{
+			name: "settings not a mapping",
+			yaml: `
+roles:
+  - name: "app"
+    settings: [work_mem]`,
+			wantErr: "settings must be a mapping",
 		},
 		{
 			name: "undeclared role in role_settings",
