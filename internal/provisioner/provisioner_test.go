@@ -3084,39 +3084,46 @@ func TestDryRunExtensionVersionUpdateDoesNotExecute(t *testing.T) {
 	}
 }
 
-func TestMissingPreloadLibraries(t *testing.T) {
-	exts := []config.Extension{{Name: "pgcrypto"}, {Name: "pg_stat_statements"}, {Name: "pg_cron"}}
+const preloadWarning = "requires shared_preload_libraries"
+
+func expectShowPreload(mock sqlmock.Sqlmock, loaded string) {
+	mock.ExpectQuery(`SHOW shared_preload_libraries`).
+		WillReturnRows(sqlmock.NewRows([]string{"shared_preload_libraries"}).AddRow(loaded))
+}
+
+func expectExtensionExists(mock sqlmock.Sqlmock, name string, exists bool) {
+	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM pg_extension WHERE extname = \$1\)`).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(exists))
+}
+
+func TestParsePreloadLibraries(t *testing.T) {
 	tests := []struct {
-		name    string
-		loaded  string
-		missing string
+		raw  string
+		want []string
 	}{
-		{"nothing preloaded", "", "pg_stat_statements,pg_cron"},
-		{"one preloaded", "pg_stat_statements", "pg_cron"},
-		{"all preloaded with spaces and quotes", `auto_explain, "pg_cron", pg_stat_statements`, ""},
+		{"", nil},
+		{"pg_stat_statements", []string{"pg_stat_statements"}},
+		{`auto_explain, "pg_cron" ,pg_stat_statements`, []string{"auto_explain", "pg_cron", "pg_stat_statements"}},
+		{"$libdir/pg_stat_statements", []string{"pg_stat_statements"}},
+		{"pg_stat_statements.so, timescaledb.dylib", []string{"pg_stat_statements", "timescaledb"}},
+		{`"$libdir/pg_cron.so"`, []string{"pg_cron"}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockDB, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
+		t.Run(tt.raw, func(t *testing.T) {
+			got := parsePreloadLibraries(tt.raw)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parsePreloadLibraries(%q) = %v, want %v", tt.raw, got, tt.want)
 			}
-			defer mockDB.Close()
-			mock.ExpectQuery(`SHOW shared_preload_libraries`).
-				WillReturnRows(sqlmock.NewRows([]string{"shared_preload_libraries"}).AddRow(tt.loaded))
-
-			missing, err := missingPreloadLibraries(context.Background(), mockDB, exts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := strings.Join(missing, ","); got != tt.missing {
-				t.Errorf("missing = %q, want %q", got, tt.missing)
+			for _, lib := range tt.want {
+				if !got[lib] {
+					t.Errorf("parsePreloadLibraries(%q) = %v, missing %q", tt.raw, got, lib)
+				}
 			}
 		})
 	}
 }
 
-func TestMissingPreloadLibrariesSkipsQueryWhenNotNeeded(t *testing.T) {
+func TestCheckPreloadLibrariesSkipsQueryWhenNotNeeded(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -3124,28 +3131,149 @@ func TestMissingPreloadLibrariesSkipsQueryWhenNotNeeded(t *testing.T) {
 	defer mockDB.Close()
 	// No SHOW expected.
 
-	missing, err := missingPreloadLibraries(context.Background(), mockDB, []config.Extension{{Name: "pgcrypto"}})
-	if err != nil || missing != nil {
-		t.Fatalf("expected (nil, nil), got (%v, %v)", missing, err)
+	p := &Provisioner{}
+	database := config.Database{Name: "db", Extensions: []config.Extension{{Name: "pgcrypto"}}}
+	if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestWarnMissingPreloadLibrariesIgnoresShowError(t *testing.T) {
+// pg_cron cannot be created without its library preloaded: the run must fail before any
+// schema or extension of the database is touched.
+func TestProvisionDatabaseResourcesFailsEarlyWhenCreateNeedsPreload(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mockDB.Close()
+
+	expectShowPreload(mock, "pg_stat_statements")
+	expectExtensionExists(mock, "pg_cron", false)
+	// No CREATE SCHEMA / CREATE EXTENSION.
+
+	database := config.Database{
+		Name:       "db",
+		Schemas:    []config.Schema{{Name: "app"}},
+		Extensions: []config.Extension{{Name: "pgcrypto"}, {Name: "pg_cron"}},
+	}
+	p := &Provisioner{}
+	err = p.provisionDatabaseResources(context.Background(), mockDB, database, "update")
+	if err == nil || !strings.Contains(err.Error(), "-c shared_preload_libraries=pg_cron") {
+		t.Fatalf("expected actionable preload error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An already installed pg_cron whose library is no longer preloaded only warns: the run can
+// proceed, the extension fails when used.
+func TestCheckPreloadLibrariesInstalledCreateNeedsPreloadWarns(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectShowPreload(mock, "")
+	expectExtensionExists(mock, "pg_cron", true)
+
+	p := &Provisioner{}
+	database := config.Database{Name: "db", Extensions: []config.Extension{{Name: "pg_cron"}}}
+	if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+		t.Fatalf("checkPreloadLibraries: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), preloadWarning) || !strings.Contains(logs.String(), "library=pg_cron") {
+		t.Errorf("expected preload warning, got logs:\n%s", logs.String())
+	}
+}
+
+// pg_stat_statements installs without preloading: it is checked before CREATE EXTENSION,
+// warned about, and still created.
+func TestProvisionDatabaseResourcesWarnsAndCreatesPgStatStatements(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	mock.MatchExpectationsInOrder(true)
+	expectShowPreload(mock, "auto_explain")
+	expectExtensionMissing(mock, "pg_stat_statements")
+	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "pg_stat_statements"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	database := config.Database{Name: "db", Extensions: []config.Extension{{Name: "pg_stat_statements"}}}
+	p := &Provisioner{}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), preloadWarning) || !strings.Contains(logs.String(), "library=pg_stat_statements") {
+		t.Errorf("expected preload warning, got logs:\n%s", logs.String())
+	}
+}
+
+// shared_preload_libraries is server-wide: it is read once per run and each missing library
+// is warned about once, however many databases configure it.
+func TestCheckPreloadLibrariesOncePerRun(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectShowPreload(mock, "")
+
+	p := &Provisioner{}
+	for _, name := range []string{"db1", "db2"} {
+		database := config.Database{Name: name, Extensions: []config.Extension{{Name: "pg_stat_statements"}}}
+		if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(logs.String(), preloadWarning); n != 1 {
+		t.Errorf("expected 1 preload warning, got %d:\n%s", n, logs.String())
+	}
+}
+
+// Without permission to read the setting, the check is skipped (logged once at INFO) and
+// even pg_cron is left to CREATE EXTENSION.
+func TestCheckPreloadLibrariesSkippedWhenShowFails(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
 	mock.ExpectQuery(`SHOW shared_preload_libraries`).WillReturnError(fmt.Errorf("permission denied"))
 
 	p := &Provisioner{}
-	// Must not panic or fail provisioning.
-	p.warnMissingPreloadLibraries(context.Background(), mockDB,
-		config.Database{Name: "db", Extensions: []config.Extension{{Name: "pg_stat_statements"}}})
+	for _, name := range []string{"db1", "db2"} {
+		database := config.Database{Name: name, Extensions: []config.Extension{{Name: "pg_cron"}}}
+		if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+			t.Fatalf("expected the check to be skipped, got: %v", err)
+		}
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+	if n := strings.Count(logs.String(), "level=INFO msg=\"Could not read shared_preload_libraries"); n != 1 {
+		t.Errorf("expected 1 info log about the skipped check, got %d:\n%s", n, logs.String())
 	}
 }

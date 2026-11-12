@@ -68,59 +68,127 @@ func createExtensionSQL(ext config.Extension) string {
 	return strings.Join(parts, " ")
 }
 
-// preloadLibraries maps extensions to the library they require in the server's
-// shared_preload_libraries. CREATE EXTENSION succeeds without it, but the extension's
-// views/functions fail at use time — e.g. pg_stat_statements, which postgres_exporter reads.
-var preloadLibraries = map[string]string{
-	"pg_stat_statements": "pg_stat_statements",
-	"pg_cron":            "pg_cron",
-	"timescaledb":        "timescaledb",
+// preloadRequirement describes an extension whose library must be listed in the server's
+// shared_preload_libraries.
+type preloadRequirement struct {
+	library string
+	// requiredForCreate is true when CREATE EXTENSION itself fails without the library
+	// preloaded, because the library's _PG_init raises an ERROR when loaded any other way.
+	// Otherwise CREATE EXTENSION succeeds and the extension only fails when used.
+	requiredForCreate bool
 }
 
-// warnMissingPreloadLibraries logs a warning for each configured extension whose library
-// is not in shared_preload_libraries. The provisioner can't fix this itself: the setting
-// requires a server restart. Failure to read the setting is logged at debug level only,
-// since a non-superuser admin may not be allowed to see it.
-func (p *Provisioner) warnMissingPreloadLibraries(ctx context.Context, dbConn *sql.DB, database config.Database) {
-	missing, err := missingPreloadLibraries(ctx, dbConn, database.Extensions)
-	if err != nil {
-		slog.Debug("Could not check shared_preload_libraries", "database", database.Name, "error", err)
-		return
-	}
-	for _, lib := range missing {
-		slog.Warn("Extension requires shared_preload_libraries; it is installed but will fail when used until the server is restarted with the library preloaded",
-			"database", database.Name, "library", lib,
-			"hint", "start postgres with -c shared_preload_libraries="+lib)
-	}
+// preloadRequirements maps extensions to the library they require in shared_preload_libraries.
+// pg_stat_statements installs fine but its views fail at use time (e.g. for postgres_exporter);
+// pg_cron and timescaledb refuse to be created at all.
+var preloadRequirements = map[string]preloadRequirement{
+	"pg_stat_statements": {library: "pg_stat_statements"},
+	"pg_cron":            {library: "pg_cron", requiredForCreate: true},
+	"timescaledb":        {library: "timescaledb", requiredForCreate: true},
 }
 
-// missingPreloadLibraries returns the preload libraries required by exts that the server
-// has not loaded. It only queries the server when at least one extension needs preloading.
-func missingPreloadLibraries(ctx context.Context, dbConn *sql.DB, exts []config.Extension) ([]string, error) {
-	var needed []string
-	for _, ext := range exts {
-		if lib, ok := preloadLibraries[ext.Name]; ok {
-			needed = append(needed, lib)
+// preloadState caches the server's shared_preload_libraries for one Run. The setting is
+// server-wide, so it is read at most once, and each missing library is warned about once.
+type preloadState struct {
+	checked bool
+	// loaded is nil when the setting could not be read and the check is skipped.
+	loaded map[string]bool
+	warned map[string]bool
+}
+
+// checkPreloadLibraries runs before any extension of database is created. For each configured
+// extension whose library isn't preloaded, it fails if the extension can't be created without
+// the library and isn't installed yet; otherwise it logs a warning. The provisioner can't fix
+// this itself, since changing shared_preload_libraries requires a server restart.
+// If the setting can't be read (a non-superuser admin without pg_read_all_settings), the check
+// is skipped with an info log.
+func (p *Provisioner) checkPreloadLibraries(ctx context.Context, dbConn *sql.DB, database config.Database) error {
+	var exts []config.Extension
+	for _, ext := range database.Extensions {
+		if _, ok := preloadRequirements[ext.Name]; ok {
+			exts = append(exts, ext)
 		}
 	}
-	if len(needed) == 0 {
-		return nil, nil
+	if len(exts) == 0 {
+		return nil
 	}
+
+	loaded := p.loadedPreloadLibraries(ctx, dbConn)
+	if loaded == nil {
+		return nil
+	}
+	for _, ext := range exts {
+		req := preloadRequirements[ext.Name]
+		if loaded[req.library] {
+			continue
+		}
+		if req.requiredForCreate {
+			installed, err := extensionInstalled(ctx, dbConn, ext.Name)
+			if err != nil {
+				return fmt.Errorf("checking installed extension %q in database %q: %w", ext.Name, database.Name, err)
+			}
+			if !installed {
+				return fmt.Errorf("extension %q in database %q can only be created when library %q is in shared_preload_libraries: "+
+					"restart postgres with -c shared_preload_libraries=%s (or set it in postgresql.conf)",
+					ext.Name, database.Name, req.library, req.library)
+			}
+		}
+		p.warnMissingPreloadLibrary(req.library)
+	}
+	return nil
+}
+
+// loadedPreloadLibraries returns the server's preloaded libraries, reading the setting on
+// first use. It returns nil when the setting can't be read.
+func (p *Provisioner) loadedPreloadLibraries(ctx context.Context, dbConn *sql.DB) map[string]bool {
+	if p.preload.checked {
+		return p.preload.loaded
+	}
+	p.preload.checked = true
 
 	var raw string
 	if err := dbConn.QueryRowContext(ctx, "SHOW shared_preload_libraries").Scan(&raw); err != nil {
-		return nil, err
+		slog.Info("Could not read shared_preload_libraries; skipping the preload check for extensions",
+			"error", err, "hint", "grant pg_read_all_settings to the admin role to enable it")
+		return nil
 	}
-	loaded := make(map[string]bool)
-	for _, lib := range strings.Split(raw, ",") {
-		loaded[strings.Trim(strings.TrimSpace(lib), `"`)] = true
-	}
+	p.preload.loaded = parsePreloadLibraries(raw)
+	return p.preload.loaded
+}
 
-	var missing []string
-	for _, lib := range needed {
-		if !loaded[lib] {
-			missing = append(missing, lib)
+// warnMissingPreloadLibrary logs that library isn't preloaded, once per Run.
+func (p *Provisioner) warnMissingPreloadLibrary(library string) {
+	if p.preload.warned[library] {
+		return
+	}
+	if p.preload.warned == nil {
+		p.preload.warned = make(map[string]bool)
+	}
+	p.preload.warned[library] = true
+	slog.Warn("Extension requires shared_preload_libraries; it is installed but will fail when used until the server is restarted with the library preloaded",
+		"library", library, "hint", "start postgres with -c shared_preload_libraries="+library)
+}
+
+// parsePreloadLibraries parses the comma-separated shared_preload_libraries setting into a set
+// of library names. Entries are normalized the way the server resolves them, so
+// "$libdir/pg_stat_statements" and "pg_stat_statements.so" both count as "pg_stat_statements".
+func parsePreloadLibraries(raw string) map[string]bool {
+	loaded := make(map[string]bool)
+	for _, entry := range strings.Split(raw, ",") {
+		lib := strings.Trim(strings.TrimSpace(entry), `"`)
+		lib = strings.TrimPrefix(lib, "$libdir/")
+		lib = strings.TrimSuffix(lib, ".so")
+		lib = strings.TrimSuffix(lib, ".dylib")
+		if lib != "" {
+			loaded[lib] = true
 		}
 	}
-	return missing, nil
+	return loaded
+}
+
+func extensionInstalled(ctx context.Context, dbConn *sql.DB, name string) (bool, error) {
+	var installed bool
+	err := dbConn.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)", name).Scan(&installed)
+	return installed, err
 }

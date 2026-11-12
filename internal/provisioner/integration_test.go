@@ -2065,3 +2065,44 @@ databases:
 		}
 	})
 }
+
+// TestIntegrationPreloadRequiredForCreate verifies that an extension which can't be created
+// without its library preloaded fails the run with an actionable error before anything in the
+// database is changed.
+func TestIntegrationPreloadRequiredForCreate(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "crondb"
+    schemas:
+      - name: "app"
+    extensions: ["pgcrypto", "pg_cron"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "-c shared_preload_libraries=pg_cron") {
+		t.Fatalf("expected preload error for pg_cron, got: %v", err)
+	}
+
+	dbCfg := connCfg
+	dbCfg.DBName = "crondb"
+	conn, err := db.Connect(context.Background(), dbCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var changes int
+	err = conn.QueryRow(`SELECT (SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto')
+		+ (SELECT count(*) FROM pg_namespace WHERE nspname = 'app')`).Scan(&changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changes != 0 {
+		t.Errorf("expected no schema or extension to be created before the preload error")
+	}
+}

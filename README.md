@@ -192,10 +192,19 @@ databases:
   Without `version`, installed extensions are never updated. `strategy: create` never updates.
 - An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
   breaks references to its objects — a warning with the command to run is logged instead.
-- **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` only work when their
-  library is in the server's `shared_preload_libraries` (which needs a restart). The provisioner
-  installs them either way and logs a warning if the library isn't loaded. For postgres_exporter's
-  `pg_stat_statements` metrics, start the server with it, e.g. in Docker Compose:
+- **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` need their library in the
+  server's `shared_preload_libraries` (which needs a restart). Before touching a database, the
+  provisioner reads the setting once per run (`$libdir/` prefixes and `.so`/`.dylib` suffixes are
+  ignored) and, for a library that isn't loaded:
+  - `pg_cron`, `timescaledb`: `CREATE EXTENSION` itself fails without preloading, so if the
+    extension isn't installed yet the run **fails** with an error naming the server flag to add.
+    If it is already installed, a warning is logged.
+  - `pg_stat_statements`: installs fine but fails when used, so it is installed and a warning
+    is logged (once per run).
+
+  If the admin role may not read the setting (not a superuser and no `pg_read_all_settings`),
+  the check is skipped and logged at info level. For postgres_exporter's `pg_stat_statements`
+  metrics, start the server with the library, e.g. in Docker Compose:
 
   ```yaml
   postgres:
