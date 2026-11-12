@@ -205,3 +205,16 @@ roles:
 		})
 	}
 }
+
+func TestLoadReportsUnresolvedSettingReference(t *testing.T) {
+	path := writeTempConfig(t, `
+roles:
+  - name: "app"
+    settings:
+      statement_timeout: "${SETTING_TIMEOUT_UNSET}"
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "roles[0].settings.statement_timeout[0]: environment variable SETTING_TIMEOUT_UNSET is not set") {
+		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}
