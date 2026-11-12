@@ -318,6 +318,7 @@ services:
 7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
 8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
 9. **Object grants** — `on_tables` grants (per-database), after migrations so they can target tables migrations create.
+10. **Publications** — `CREATE PUBLICATION` / additive `ALTER PUBLICATION` (per-database), after migrations.
 
 ## Grant Types
 
@@ -428,6 +429,35 @@ databases:
   schema's defaults: only its owner holds privileges, so revoking from `PUBLIC` would do nothing.
 - With `strategy: create`, revokes (like other per-database resources) only apply to newly
   created databases. Use `strategy: update` to harden an existing database.
+
+## Publications
+
+Logical replication publications, e.g. as the source for CDC with Debezium or Redpanda Connect:
+
+```yaml
+databases:
+  - name: "myapp"
+    publications:
+      - name: "cdc"
+        tables: ["app.orders", "billing.invoices"]   # schema-qualified
+        publish: ["insert", "update", "delete"]      # optional; default: all incl. truncate
+      - name: "everything"
+        all_tables: true                             # FOR ALL TABLES (requires superuser)
+```
+
+- Provisioned **after migrations** (and `on_tables` grants), so they can publish tables the
+  migrations create. A table still missing then fails provisioning (dry-run only logs it).
+- Existing publications are reconciled **additively**: a changed `publish` list is applied
+  (`ALTER PUBLICATION ... SET (publish = ...)`) and missing tables are added (`ADD TABLE`).
+  Published tables that are no longer configured are **not** dropped — that could silently
+  cut off a consumer — a warning is logged instead. `all_tables` can't be changed on an
+  existing publication (warning). With `strategy: create`, existing publications are left as-is.
+- Prerequisites the provisioner can't set: the server needs `wal_level=logical` (a warning is
+  logged otherwise; requires a restart). Tables published for `update`/`delete` need a primary
+  key or `REPLICA IDENTITY`, or those statements fail on the source.
+- Replication slots are not managed: CDC consumers create their own, and an unused slot
+  retains WAL indefinitely. The CDC user needs `options: { replication: true }` and `SELECT`
+  on the published tables (e.g. via `on_tables` grants).
 
 ## Migrations
 

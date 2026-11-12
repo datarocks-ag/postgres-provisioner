@@ -218,6 +218,8 @@ type Database struct {
 	// RoleSettings are per-role defaults within this database (ALTER ROLE ... IN DATABASE ... SET),
 	// keyed by role name. They follow this database's strategy, not the role's.
 	RoleSettings map[string]Settings `yaml:"role_settings"`
+	// Publications are logical replication publications, provisioned after migrations.
+	Publications []Publication `yaml:"publications"`
 	Strategy     string              `yaml:"strategy"`
 }
 
@@ -269,6 +271,9 @@ func expandConfig(cfg *Config) error {
 			ext.Name = e.expand(extPath+".name", ext.Name)
 			ext.Schema = e.expand(extPath+".schema", ext.Schema)
 			ext.Version = e.expand(extPath+".version", ext.Version)
+		}
+		for j := range d.Publications {
+			e.expandPublication(fmt.Sprintf("%s.publications[%d]", path, j), &d.Publications[j])
 		}
 		for j := range d.Schemas {
 			sPath := fmt.Sprintf("%s.schemas[%d]", path, j)
@@ -754,6 +759,10 @@ func validate(cfg *Config) error {
 			}
 		}
 		if err := checkRevokeConflicts(fmt.Sprintf("databases[%d]", i), d); err != nil {
+			return err
+		}
+
+		if err := validatePublications(fmt.Sprintf("databases[%d]", i), d.Publications); err != nil {
 			return err
 		}
 

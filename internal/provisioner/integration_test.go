@@ -2141,3 +2141,129 @@ databases:
 		t.Errorf("expected drop-and-recreate hint, logs:\n%s", logs.String())
 	}
 }
+
+// publishedTables returns the sorted schema.table names of a publication.
+func publishedTables(t *testing.T, conn *sql.DB, publication string) string {
+	t.Helper()
+	var tables sql.NullString
+	err := conn.QueryRowContext(context.Background(), `
+		SELECT string_agg(schemaname || '.' || tablename, ',' ORDER BY schemaname, tablename)
+		FROM pg_publication_tables WHERE pubname = $1`, publication).Scan(&tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tables.String
+}
+
+// TestIntegrationPublications provisions publications over tables created by a migration
+// in the same run, checks idempotency, then adds a table by changing the config.
+func TestIntegrationPublications(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t, "-c", "wal_level=logical")
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__tables.sql", `
+CREATE TABLE app.orders (id int PRIMARY KEY);
+CREATE TABLE app.customers (id int PRIMARY KEY);
+`)
+
+	ctx := context.Background()
+	runWithTables := func(tables string) string {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+databases:
+  - name: "cdcdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: %s
+        publish: ["insert", "update", "delete"]
+      - name: "everything"
+        all_tables: true
+`, migrationsDir, tables)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		defer slog.SetDefault(prev)
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+		return logs.String()
+	}
+
+	firstLogs := runWithTables(`["app.orders"]`)
+	if strings.Contains(firstLogs, "wal_level=logical for logical replication") {
+		t.Errorf("unexpected wal_level warning with wal_level=logical, logs:\n%s", firstLogs)
+	}
+
+	cdcDB := connectAs(t, connCfg, connCfg.User, connCfg.Password, "cdcdb")
+	if got := publishedTables(t, cdcDB, "cdc"); got != "app.orders" {
+		t.Fatalf("cdc tables = %q, want app.orders", got)
+	}
+	var truncate, allTables bool
+	if err := cdcDB.QueryRowContext(ctx, `SELECT pubtruncate FROM pg_publication WHERE pubname = 'cdc'`).Scan(&truncate); err != nil {
+		t.Fatal(err)
+	}
+	if truncate {
+		t.Error("expected cdc not to publish truncate")
+	}
+	if err := cdcDB.QueryRowContext(ctx, `SELECT puballtables FROM pg_publication WHERE pubname = 'everything'`).Scan(&allTables); err != nil {
+		t.Fatal(err)
+	}
+	if !allTables {
+		t.Error("expected publication everything to be FOR ALL TABLES")
+	}
+
+	secondLogs := runWithTables(`["app.orders"]`)
+	if strings.Contains(secondLogs, "Adding tables") || strings.Contains(secondLogs, "Updating publication") {
+		t.Errorf("second run should not change publications, logs:\n%s", secondLogs)
+	}
+
+	runWithTables(`["app.orders", "app.customers"]`)
+	if got := publishedTables(t, cdcDB, "cdc"); got != "app.customers,app.orders" {
+		t.Errorf("cdc tables = %q, want app.customers,app.orders", got)
+	}
+}
+
+func TestIntegrationPublicationWalLevelWarning(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t) // default wal_level=replica
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "replicadb"
+    publications:
+      - { name: "everything", all_tables: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background())
+	slog.SetDefault(prev)
+	if err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+
+	if !strings.Contains(logs.String(), "wal_level=replica") {
+		t.Errorf("expected wal_level warning, logs:\n%s", logs.String())
+	}
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "replicadb")
+	var exists bool
+	if err := conn.QueryRowContext(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = 'everything')`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Error("publication should still be created when wal_level is not logical")
+	}
+}
