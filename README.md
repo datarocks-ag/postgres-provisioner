@@ -184,7 +184,8 @@ Rules:
 - **Passwords must not resolve to empty.** A `password` containing a reference that expands
   to `""` fails, since an empty password would silently provision the role without one.
 - Error messages never contain resolved values or file contents.
-- Default values cannot contain `}`.
+- Default values cannot contain `}` or another reference: nested references such as
+  `${A:-${B}}` are rejected with an error.
 
 ```yaml
 # docker-compose.yaml

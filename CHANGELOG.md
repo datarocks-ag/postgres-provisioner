@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING: unresolved `${VAR}` references now fail config loading.** Previously an unset variable was left in place as literal text, so e.g. a missing `APP_DB_PASSWORD` silently set the role's password to the string `${APP_DB_PASSWORD}`. Loading now fails and reports every unresolved reference with its config path. Migration: for values that are intentionally optional, use `${VAR:-}` or `${VAR:-default}`.
 - **BREAKING: role passwords that resolve to an empty string are rejected.** A `password` containing a reference that expands to `""` would otherwise provision the role without a password.
 - Invalid references such as `${foo bar}` or `${}` are now errors instead of being left as literal text.
+- Nested references in defaults (`${A:-${B}}`) are rejected; they are not supported and previously produced wrong values (a literal `${B}` or a stray `}`).
 - `roles[].options.valid_until` now supports `${VAR}` expansion.
 
 ### Added

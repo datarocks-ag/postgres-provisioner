@@ -102,12 +102,38 @@ func (e *expander) expandReferences(path, s string) (string, bool) {
 		}
 		end := start + 2 + length // index of the closing '}'
 		out.WriteString(s[:start])
-		out.WriteString(e.resolve(path, s[start:end+1]))
 		hasReference = true
+		if strings.Contains(s[start+2:end], "${") {
+			// The first '}' would close the inner reference and leave the outer one's
+			// '}' behind, so reject the whole construct instead of guessing.
+			e.errs = append(e.errs, fmt.Errorf("%s: nested references are not supported", path))
+			s = s[nestedReferenceEnd(s, start)+1:]
+			continue
+		}
+		out.WriteString(e.resolve(path, s[start:end+1]))
 		s = s[end+1:]
 	}
 	out.WriteString(s)
 	return out.String(), hasReference
+}
+
+// nestedReferenceEnd returns the index of the '}' that balances the "${" at start,
+// or len(s)-1 if it is never balanced, so no part of a nested reference is emitted.
+func nestedReferenceEnd(s string, start int) int {
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch {
+		case strings.HasPrefix(s[i:], "${"):
+			depth++
+			i++
+		case s[i] == '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return len(s) - 1
 }
 
 // resolve returns the value for a single ${...} reference, recording an error and

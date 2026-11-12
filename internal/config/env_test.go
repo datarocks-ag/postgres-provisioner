@@ -116,6 +116,35 @@ func TestExpandReportsErrors(t *testing.T) {
 	}
 }
 
+func TestExpandRejectsNestedReferences(t *testing.T) {
+	tests := []struct {
+		name  string
+		env   map[string]string
+		input string
+	}{
+		{name: "unset outer, nested default", env: map[string]string{"NEST_B": "bval"}, input: "x${NEST_UNSET:-${NEST_B}}y"},
+		{name: "set outer, nested default", env: map[string]string{"NEST_A": "aval", "NEST_B": "bval"}, input: "x${NEST_A:-${NEST_B}}y"},
+		{name: "deeper nesting", env: map[string]string{"NEST_A": "aval"}, input: "x${NEST_A:-${NEST_B:-${NEST_C}}}y"},
+		{name: "unbalanced nesting", env: map[string]string{"NEST_A": "aval"}, input: "x${NEST_A:-${NEST_B}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			e := &expander{}
+			got := e.expand("roles[0].name", tt.input)
+			err := e.err()
+			if err == nil || !strings.Contains(err.Error(), "roles[0].name: nested references are not supported") {
+				t.Fatalf("expected nested-reference error, got: %v", err)
+			}
+			if strings.ContainsAny(got, "{}") || strings.Contains(got, "val") {
+				t.Errorf("expand(%q) = %q, want no remnants of the nested reference", tt.input, got)
+			}
+		})
+	}
+}
+
 func TestLoadReportsAllUnresolvedReferences(t *testing.T) {
 	path := writeTempConfig(t, `
 roles:
