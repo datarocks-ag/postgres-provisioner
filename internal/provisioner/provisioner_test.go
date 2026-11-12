@@ -3004,6 +3004,7 @@ func TestEnsureExtensionVersionDriftUpdates(t *testing.T) {
 	defer mockDB.Close()
 
 	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	expectUpdatePath(mock, "pg_stat_statements", "1.9", "1.10", true)
 	mock.ExpectExec(`^ALTER EXTENSION "pg_stat_statements" UPDATE TO '1\.10'$`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -3015,6 +3016,38 @@ func TestEnsureExtensionVersionDriftUpdates(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A pinned version below the installed one (or one without an update script) can't be reached
+// with ALTER EXTENSION ... UPDATE TO: warn and keep the installed version instead of failing.
+func TestEnsureExtensionWithoutUpdatePathWarnsAndSkips(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.10", "public")
+	expectUpdatePath(mock, "pg_stat_statements", "1.10", "1.9", false)
+	// No ALTER EXTENSION.
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.9"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "No update path") {
+		t.Errorf("expected no-update-path warning, got logs:\n%s", logs.String())
+	}
+}
+
+func expectUpdatePath(mock sqlmock.Sqlmock, name, from, to string, exists bool) {
+	mock.ExpectQuery(`FROM pg_extension_update_paths\(\$1\)`).WithArgs(name, from, to).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(exists))
 }
 
 func TestEnsureExtensionVersionDriftStrategyCreateSkips(t *testing.T) {
@@ -3073,6 +3106,7 @@ func TestDryRunExtensionVersionUpdateDoesNotExecute(t *testing.T) {
 	defer mockDB.Close()
 
 	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	expectUpdatePath(mock, "pg_stat_statements", "1.9", "1.10", true)
 
 	p := &Provisioner{opts: dryRunOptions()}
 	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}

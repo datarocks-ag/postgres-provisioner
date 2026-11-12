@@ -48,6 +48,24 @@ func (p *Provisioner) ensureExtension(ctx context.Context, dbConn *sql.DB, ext c
 		return nil
 	}
 
+	// A downgrade or a version the server doesn't ship has no update path; ALTER EXTENSION
+	// would fail and abort the run, while the installed version keeps working.
+	var hasUpdatePath bool
+	err = dbConn.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_extension_update_paths($1)
+		WHERE source = $2 AND target = $3 AND path IS NOT NULL)`,
+		ext.Name, installedVersion, ext.Version,
+	).Scan(&hasUpdatePath)
+	if err != nil {
+		return fmt.Errorf("checking extension update path: %w", err)
+	}
+	if !hasUpdatePath {
+		slog.Warn("No update path from the installed to the configured extension version; skipping update",
+			"extension", ext.Name, "installed_version", installedVersion, "configured_version", ext.Version,
+			"hint", "a downgrade needs DROP EXTENSION and CREATE EXTENSION ... VERSION; otherwise install a package providing the version")
+		return nil
+	}
+
 	slog.Info("Updating extension", "extension", ext.Name, "from", installedVersion, "to", ext.Version)
 	query := fmt.Sprintf("ALTER EXTENSION %s UPDATE TO %s", quoteIdentifier(ext.Name), quoteLiteral(ext.Version))
 	_, err = p.execMutation(ctx, dbConn, query)

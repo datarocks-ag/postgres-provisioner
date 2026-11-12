@@ -2022,6 +2022,12 @@ databases:
 	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.10" {
 		t.Errorf("expected pg_stat_statements updated to 1.10, got %s", version)
 	}
+
+	// No update path for a downgrade: the run succeeds and keeps the installed version.
+	runWithVersion("1.9")
+	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.10" {
+		t.Errorf("expected pg_stat_statements to stay at 1.10 after a pinned downgrade, got %s", version)
+	}
 }
 
 // TestIntegrationPreloadLibraryWarning verifies the shared_preload_libraries warning for

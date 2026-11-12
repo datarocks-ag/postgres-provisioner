@@ -190,6 +190,9 @@ databases:
 - Missing extensions are created with the given `schema`, `version` and `cascade`.
 - An installed extension at a different pinned `version` is updated (`ALTER EXTENSION ... UPDATE TO`).
   Without `version`, installed extensions are never updated. `strategy: create` never updates.
+  If the server has no update path from the installed to the pinned version (a downgrade, or a
+  version it doesn't ship, per `pg_extension_update_paths`), a warning is logged and the
+  installed version is kept.
 - An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
   breaks references to its objects — a warning with the command to run is logged instead.
 - **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` need their library in the
