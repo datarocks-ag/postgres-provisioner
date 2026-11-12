@@ -167,8 +167,8 @@ String values support `${VAR}` references, resolved when the config is loaded:
 | Syntax | Behavior |
 |---|---|
 | `${VAR}` | Value of `VAR`; falls back to the contents of the file named by `VAR_FILE`. **Fails if neither is set.** |
-| `${VAR:-default}` | Like `${VAR}`, but uses `default` when neither `VAR` nor `VAR_FILE` is set. |
-| `${VAR:-}` | Optional value: empty string when unset. |
+| `${VAR:-default}` | Like `${VAR}`, but uses `default` when the variable is unset **or empty** (POSIX/Compose semantics). |
+| `${VAR:-}` | Optional value: empty string when unset or empty. |
 
 ```yaml
 password: "${APP_DB_PASSWORD}"          # from APP_DB_PASSWORD or the file in APP_DB_PASSWORD_FILE

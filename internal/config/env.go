@@ -151,11 +151,12 @@ func (e *expander) resolve(path, reference string) string {
 		e.errs = append(e.errs, fmt.Errorf("%s: %w", path, err))
 		return reference
 	}
+	// Like POSIX shells and Docker Compose, ":-" also applies when the value is empty.
+	if hasDefault && val == "" {
+		return defaultVal
+	}
 	if ok {
 		return val
-	}
-	if hasDefault {
-		return defaultVal
 	}
 	e.errs = append(e.errs, fmt.Errorf("%s: environment variable %s is not set (set %s or %s_FILE)", path, name, name, name))
 	return reference

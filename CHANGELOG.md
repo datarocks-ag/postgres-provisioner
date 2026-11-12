@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Role memberships (`member_of`)** — `roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`), including PostgreSQL predefined roles such as `pg_monitor`. This enables a least-privilege, non-superuser account for `postgres_exporter` instead of the admin user. Memberships are applied in a separate pass after all roles are provisioned (config order doesn't matter), already-granted memberships are skipped, nothing is ever revoked, and `strategy: create` skips memberships for pre-existing roles. Circular memberships among declared roles are rejected at validation. Supported in dry-run mode.
 - **`*_FILE` secret support** — every `${VAR}` reference falls back to the contents of the file named by `VAR_FILE` (Docker secrets / Kubernetes secret volumes; trailing newlines trimmed, max 64 KiB). The provisioner's own environment variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, …) accept `<NAME>_FILE` as well. Setting both `VAR` and `VAR_FILE` is an error.
-- **Default values** — `${VAR:-default}` uses `default` when the variable is unset; `${VAR:-}` marks a value as optional.
+- **Default values** — `${VAR:-default}` uses `default` when the variable is unset or empty (POSIX/Docker Compose semantics); `${VAR:-}` marks a value as optional.
 
 ## [1.3.0] - 2026-07-16
 
