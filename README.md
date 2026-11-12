@@ -273,6 +273,8 @@ databases:
   granted it on to other roles, PostgreSQL rejects the `REVOKE` with "dependent privileges
   exist" and the run fails with a hint. Revoke the dependent grants first (or run
   `REVOKE ... CASCADE` manually if removing them is intended).
+- In dry-run, a revoke on a schema created in the same run is previewed against a new
+  schema's defaults: only its owner holds privileges, so revoking from `PUBLIC` would do nothing.
 - With `strategy: create`, revokes (like other per-database resources) only apply to newly
   created databases. Use `strategy: update` to harden an existing database.
 

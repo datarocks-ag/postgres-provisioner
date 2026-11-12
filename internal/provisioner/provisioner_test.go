@@ -2150,3 +2150,147 @@ func TestRevokeDependentPrivilegesErrorHasHint(t *testing.T) {
 		t.Errorf("expected hint about grant option and CASCADE, got %v", err)
 	}
 }
+
+// captureSQL records the SQL that dry-run execMutation logs until the test ends.
+func captureSQL(t *testing.T) *[]string {
+	t.Helper()
+	var captured []string
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == "sql" {
+				captured = append(captured, a.Value.String())
+			}
+			return a
+		},
+	})))
+	return &captured
+}
+
+// TestDryRunRevokeOnNewSchema previews revokes on a schema that this run would create.
+// A new schema only grants to its owner, so only revokes from the owner would run.
+func TestDryRunRevokeOnNewSchema(t *testing.T) {
+	database := config.Database{
+		Name:    "myapp",
+		Owner:   "db_owner",
+		Schemas: []config.Schema{{Name: "data", Owner: "schema_owner"}, {Name: "inherits"}},
+	}
+	tests := []struct {
+		name    string
+		revoke  config.Grant
+		wantSQL string // empty: nothing to revoke
+	}{
+		{
+			name:   "PUBLIC holds nothing",
+			revoke: config.Grant{Role: "PUBLIC", Privileges: []string{"ALL"}, OnSchema: "data"},
+		},
+		{
+			name:   "non-owner holds nothing",
+			revoke: config.Grant{Role: "db_owner", Privileges: []string{"ALL"}, OnSchema: "data"},
+		},
+		{
+			name:    "schema owner holds everything",
+			revoke:  config.Grant{Role: "schema_owner", Privileges: []string{"ALL"}, OnSchema: "data"},
+			wantSQL: `REVOKE CREATE, USAGE ON SCHEMA "data" FROM "schema_owner"`,
+		},
+		{
+			name:    "owner falls back to database owner",
+			revoke:  config.Grant{Role: "db_owner", Privileges: []string{"CREATE"}, OnSchema: "inherits"},
+			wantSQL: `REVOKE CREATE ON SCHEMA "inherits" FROM "db_owner"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+			mock.ExpectQuery(schemaExistsQuery).WithArgs(tt.revoke.OnSchema).
+				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+			captured := captureSQL(t)
+			p := &Provisioner{opts: dryRunOptions()}
+			if err := p.applyRevoke(context.Background(), mockDB, database, tt.revoke); err != nil {
+				t.Fatalf("applyRevoke: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+
+			var want []string
+			if tt.wantSQL != "" {
+				want = []string{tt.wantSQL}
+			}
+			if strings.Join(*captured, "\n") != strings.Join(want, "\n") {
+				t.Errorf("expected previewed SQL %q, got %q", want, *captured)
+			}
+		})
+	}
+}
+
+// TestDryRunRevokeOnNewSchemaWithoutOwner covers a schema owned by the provisioning user.
+func TestDryRunRevokeOnNewSchemaWithoutOwner(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	mock.ExpectQuery(schemaExistsQuery).WithArgs("data").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	captured := captureSQL(t)
+	p := &Provisioner{opts: dryRunOptions(), connCfg: db.ConnConfig{User: "admin"}}
+	database := config.Database{Name: "myapp", Schemas: []config.Schema{{Name: "data"}}}
+	revoke := config.Grant{Role: "admin", Privileges: []string{"USAGE"}, OnSchema: "data"}
+	if err := p.applyRevoke(context.Background(), mockDB, database, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	want := `REVOKE USAGE ON SCHEMA "data" FROM "admin"`
+	if len(*captured) != 1 || (*captured)[0] != want {
+		t.Errorf("expected previewed SQL %q, got %q", want, *captured)
+	}
+}
+
+// TestDryRunRevokeOnUndeclaredMissingSchemaFails: a schema the run doesn't create would
+// make the real run fail, so the dry run reports the same error.
+func TestDryRunRevokeOnUndeclaredMissingSchemaFails(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	mock.ExpectQuery(schemaExistsQuery).WithArgs("nope").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	p := &Provisioner{opts: dryRunOptions()}
+	revoke := config.Grant{Role: "PUBLIC", Privileges: []string{"CREATE"}, OnSchema: "nope"}
+	err = p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke)
+	if err == nil || !strings.Contains(err.Error(), `schema "nope" does not exist`) {
+		t.Fatalf("expected missing schema error, got %v", err)
+	}
+}
+
+// TestDryRunRevokeOnNewDatabase previews against a new database's defaults: PUBLIC holds
+// CONNECT and TEMPORARY, but not CREATE.
+func TestDryRunRevokeOnNewDatabase(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	captured := captureSQL(t)
+	p := &Provisioner{opts: dryRunOptions()}
+	revoke := config.Grant{Role: "PUBLIC", Privileges: []string{"ALL"}, OnDatabase: true}
+	if err := p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	want := `REVOKE CONNECT, TEMPORARY ON DATABASE "myapp" FROM PUBLIC`
+	if len(*captured) != 1 || (*captured)[0] != want {
+		t.Errorf("expected previewed SQL %q, got %q", want, *captured)
+	}
+}

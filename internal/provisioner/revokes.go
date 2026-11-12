@@ -64,20 +64,23 @@ func (p *Provisioner) applyRevoke(ctx context.Context, dbConn *sql.DB, database 
 		return err
 	}
 
-	var toRevoke []string
-	switch {
-	case exists:
-		toRevoke = intersect(requested, held)
-	case p.opts.DryRun:
-		// The object would have been created earlier in this run; preview everything.
-		toRevoke = requested
-	default:
-		return fmt.Errorf("%s does not exist", strings.ToLower(objectSQL))
+	if !exists {
+		// In dry-run, an object declared in the config would have been created earlier in
+		// this run, so preview against the privileges a freshly created object has.
+		var created bool
+		held, created = p.newObjectPrivileges(database, target, objectName, revoke.Role)
+		if !p.opts.DryRun || !created {
+			return fmt.Errorf("%s does not exist", strings.ToLower(objectSQL))
+		}
 	}
 
+	toRevoke := intersect(requested, held)
 	if len(toRevoke) == 0 {
-		slog.Info("Privileges already revoked, skipping",
-			"role", revoke.Role, "on", strings.ToLower(objectSQL), "privileges", strings.Join(requested, ", "))
+		msg := "Privileges already revoked, skipping"
+		if !exists {
+			msg = "[DRY RUN] privileges would not be held on the newly created object, skipping"
+		}
+		slog.Info(msg, "role", revoke.Role, "on", strings.ToLower(objectSQL), "privileges", strings.Join(requested, ", "))
 		return nil
 	}
 
@@ -102,6 +105,50 @@ func (p *Provisioner) applyRevoke(ctx context.Context, dbConn *sql.DB, database 
 			"role", revoke.Role, "on", strings.ToLower(objectSQL), "privileges", strings.Join(remaining, ", "))
 	}
 	return nil
+}
+
+// newObjectPrivileges returns the privileges role would hold on an object this run
+// creates, and whether the run creates it at all (the database itself, or a schema
+// declared in schemas). A new object's ACL is acldefault(): a database grants everything
+// to its owner plus CONNECT and TEMPORARY to PUBLIC, a schema grants everything to its
+// owner and nothing to PUBLIC. Without a configured owner, the provisioning user owns it.
+func (p *Provisioner) newObjectPrivileges(database config.Database, target config.GrantTarget, objectName, role string) (map[string]bool, bool) {
+	var owner string
+	switch target {
+	case config.TargetDatabase:
+		owner = database.Owner
+	case config.TargetSchema:
+		if !declaresSchema(database, objectName) {
+			return nil, false
+		}
+		owner = schemaOwnerFor(database, objectName)
+	default:
+		return nil, false
+	}
+	if owner == "" {
+		owner = p.connCfg.User
+	}
+
+	held := make(map[string]bool)
+	if role == owner {
+		for _, privilege := range config.ExpandPrivileges(target, []string{"ALL"}) {
+			held[privilege] = true
+		}
+	}
+	if target == config.TargetDatabase && config.IsPublic(role) {
+		held["CONNECT"] = true
+		held["TEMPORARY"] = true
+	}
+	return held, true
+}
+
+func declaresSchema(database config.Database, name string) bool {
+	for _, s := range database.Schemas {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // explainRevokeError adds a hint to "dependent privileges exist". The provisioner never
