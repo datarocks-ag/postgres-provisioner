@@ -1410,3 +1410,42 @@ databases:
 		t.Error("expected downstream to keep CONNECT: the provisioner must not cascade")
 	}
 }
+
+// TestIntegrationRevokeSkippedForExistingDatabaseWithCreateStrategy: strategy=create only
+// provisions sub-resources of newly created databases, so revokes leave an existing
+// database untouched.
+func TestIntegrationRevokeSkippedForExistingDatabaseWithCreateStrategy(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{`CREATE ROLE outsider LOGIN`, `CREATE DATABASE preexisting`} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	cfg, err := config.Load(writeTestConfig(t, `
+strategy: create
+databases:
+  - name: "preexisting"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
+
+	var outsiderCanConnect bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT has_database_privilege('outsider', 'preexisting', 'CONNECT')`,
+	).Scan(&outsiderCanConnect); err != nil {
+		t.Fatal(err)
+	}
+	if !outsiderCanConnect {
+		t.Error("expected strategy=create to skip revokes on the existing database")
+	}
+}
