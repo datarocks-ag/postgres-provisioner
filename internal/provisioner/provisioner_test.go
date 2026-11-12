@@ -2295,7 +2295,10 @@ func TestDryRunRevokeOnNewDatabase(t *testing.T) {
 	}
 }
 
-const toRegclassQuery = `SELECT to_regclass\(\$1\)::text`
+const (
+	toRegclassQuery         = `SELECT to_regclass\(\$1\)::text`
+	caseInsensitiveMatchSQL = `SELECT n\.nspname, c\.relname FROM pg_class c`
+)
 
 func TestGrantOnTablesWithColumns(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
@@ -2357,12 +2360,41 @@ func TestGrantOnTablesMissingTableFails(t *testing.T) {
 
 	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."ghost"`).
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "ghost").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
 
 	p := &Provisioner{}
 	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.ghost"}}
 	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
-	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost") {
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost (on_tables") ||
+		!strings.Contains(err.Error(), "names are case-sensitive") {
 		t.Fatalf("expected missing table error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGrantOnTablesMissingTableHintsCaseInsensitiveMatch(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."Users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "Users").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}).AddRow("app", "users"))
+
+	p := &Provisioner{}
+	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.Users"}}
+	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.Users (did you mean app.users?)") {
+		t.Fatalf("expected missing table error with hint, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2375,6 +2407,8 @@ func TestDryRunObjectGrantMissingTableDoesNotFail(t *testing.T) {
 
 	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."future"`).
 		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "future").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
 	// No GRANT executed in dry-run.
 
 	p := &Provisioner{opts: dryRunOptions()}

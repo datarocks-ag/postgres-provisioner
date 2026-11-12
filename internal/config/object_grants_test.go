@@ -17,7 +17,7 @@ func TestParseQualifiedName(t *testing.T) {
 			t.Errorf("ParseQualifiedName(%q) = (%+v, %v), want %+v", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"users", "a.b.c", ".users", "app.", ""} {
+	for _, in := range []string{"users", "a.b.c", ".users", "app.", "", `"App"."Users"`, `app."Users"`} {
 		if _, err := ParseQualifiedName(in); err == nil {
 			t.Errorf("ParseQualifiedName(%q): expected error", in)
 		}
@@ -60,6 +60,11 @@ func TestValidationObjectGrantErrors(t *testing.T) {
         on_tables: ["users"]`, `databases[0].grants[0].on_tables[0]: "users" must be schema-qualified`},
 		{"too many dots", `privileges: ["SELECT"]
         on_tables: ["db.app.users"]`, "must be schema-qualified"},
+		{"pre-quoted table", `privileges: ["SELECT"]
+        on_tables: ['"App"."Users"']`, `databases[0].grants[0].on_tables[0]: "\"App\".\"Users\"" must not contain double quotes`},
+		{"pre-quoted column", `privileges: ["SELECT"]
+        on_tables: ["app.users"]
+        columns: ['"Email"']`, `databases[0].grants[0].columns[0]: "\"Email\"" must not contain double quotes`},
 		{"duplicate table", `privileges: ["SELECT"]
         on_tables: ["app.users", "app.users"]`, `databases[0].grants[0].on_tables[1]: duplicate table "app.users"`},
 		{"columns without on_tables", `privileges: ["SELECT"]

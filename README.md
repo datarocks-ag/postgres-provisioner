@@ -257,6 +257,11 @@ the same run. A table that still doesn't exist by then fails provisioning with t
 table names (in dry-run it's only logged, since migrations aren't applied). Unlike the
 `*_in_schema` targets they don't set default privileges.
 
+Table and column names are quoted for you and matched **case-sensitively**: `App.Orders`
+targets `"App"."Orders"`, not `app.orders`. Write them unquoted — names containing `"` are
+rejected at load time. If a table isn't found but exists with different case, the error
+suggests the matching name.
+
 **Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
 matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.
 

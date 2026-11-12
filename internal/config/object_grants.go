@@ -19,8 +19,12 @@ func (q QualifiedName) String() string {
 // ParseQualifiedName parses "schema.name". Exactly one dot is required: unqualified names
 // would resolve via search_path, which differs between sessions. Both parts are used
 // verbatim as quoted identifiers, so they are case-sensitive; identifiers containing a
-// dot are not supported.
+// dot or a double quote are not supported. Double quotes are rejected because they almost
+// always mean a pre-quoted name ("App"."Users"), which would otherwise be quoted twice.
 func ParseQualifiedName(s string) (QualifiedName, error) {
+	if strings.Contains(s, `"`) {
+		return QualifiedName{}, fmt.Errorf("%q must not contain double quotes: write schema.name unquoted, it is quoted automatically and matched case-sensitively", s)
+	}
 	schema, name, ok := strings.Cut(s, ".")
 	if !ok || schema == "" || name == "" || strings.Contains(name, ".") {
 		return QualifiedName{}, fmt.Errorf("%q must be schema-qualified as schema.name", s)
@@ -60,6 +64,9 @@ func validateObjectGrant(path string, g Grant) error {
 		}
 		if containsNullByte(column) {
 			return fmt.Errorf("%s: contains null byte", columnPath)
+		}
+		if strings.Contains(column, `"`) {
+			return fmt.Errorf("%s: %q must not contain double quotes: write the column unquoted, it is quoted automatically and matched case-sensitively", columnPath, column)
 		}
 		if seenColumns[column] {
 			return fmt.Errorf("%s: duplicate column %q", columnPath, column)

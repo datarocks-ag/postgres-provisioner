@@ -3,6 +3,7 @@ package provisioner
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -29,12 +30,16 @@ func (p *Provisioner) grantOnTables(ctx context.Context, dbConn *sql.DB, grant c
 		return fmt.Errorf("checking tables: %w", err)
 	}
 	if len(missing) > 0 {
+		described, err := describeMissingTables(ctx, dbConn, missing)
+		if err != nil {
+			return fmt.Errorf("checking tables: %w", err)
+		}
 		if !p.opts.DryRun {
-			return fmt.Errorf("tables not found: %s (on_tables grants run after migrations; the tables must exist by then)",
-				strings.Join(missing, ", "))
+			return fmt.Errorf("tables not found: %s (on_tables grants run after migrations; the tables must exist by then, and names are case-sensitive)",
+				described)
 		}
 		slog.Info("[DRY RUN] tables not present yet; they may be created by pending migrations",
-			"tables", strings.Join(missing, ", "))
+			"tables", described)
 	}
 
 	slog.Info("Granting on tables", "tables", strings.Join(grant.OnTables, ", "),
@@ -89,4 +94,35 @@ func missingTables(ctx context.Context, dbConn *sql.DB, names []config.Qualified
 		}
 	}
 	return missing, nil
+}
+
+// caseInsensitiveMatchQuery finds a relation whose schema and name match ignoring case.
+// Names are used verbatim as quoted identifiers, so App.Users won't find app.users; this
+// lookup only feeds the "did you mean" hint.
+const caseInsensitiveMatchQuery = `SELECT n.nspname, c.relname FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE lower(n.nspname) = lower($1) AND lower(c.relname) = lower($2)
+ORDER BY n.nspname, c.relname LIMIT 1`
+
+// describeMissingTables joins the missing table names (as returned by missingTables) for
+// messages, adding a "did you mean" hint for each one that exists with different case.
+func describeMissingTables(ctx context.Context, dbConn *sql.DB, missing []string) (string, error) {
+	described := make([]string, len(missing))
+	for i, raw := range missing {
+		described[i] = raw
+		name, err := config.ParseQualifiedName(raw)
+		if err != nil {
+			continue
+		}
+		var match config.QualifiedName
+		err = dbConn.QueryRowContext(ctx, caseInsensitiveMatchQuery, name.Schema, name.Name).Scan(&match.Schema, &match.Name)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		described[i] = fmt.Sprintf("%s (did you mean %s?)", raw, match)
+	}
+	return strings.Join(described, ", "), nil
 }
