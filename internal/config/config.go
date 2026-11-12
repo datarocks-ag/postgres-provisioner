@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -139,59 +138,59 @@ type Config struct {
 	Databases []Database `yaml:"databases"`
 }
 
-var envVarPattern = regexp.MustCompile(`\$\{([^}]+)}`)
-
-// expandEnvVars replaces ${VAR} references with their environment variable values.
-func expandEnvVars(s string) string {
-	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
-		varName := envVarPattern.FindStringSubmatch(match)[1]
-		if val, ok := os.LookupEnv(varName); ok {
-			return val
-		}
-		return match // leave unresolved vars as-is
-	})
-}
-
-// expandConfig walks the config and expands env vars in string fields.
-func expandConfig(cfg *Config) {
-	cfg.Strategy = expandEnvVars(cfg.Strategy)
+// expandConfig walks the config and expands env var references in string fields.
+// It returns every unresolved reference as a joined error.
+func expandConfig(cfg *Config) error {
+	e := &expander{}
+	cfg.Strategy = e.expand("strategy", cfg.Strategy)
 	for i := range cfg.Roles {
-		cfg.Roles[i].Name = expandEnvVars(cfg.Roles[i].Name)
-		cfg.Roles[i].Password = expandEnvVars(cfg.Roles[i].Password)
-		cfg.Roles[i].Strategy = expandEnvVars(cfg.Roles[i].Strategy)
-		for j := range cfg.Roles[i].MemberOf {
-			cfg.Roles[i].MemberOf[j] = expandEnvVars(cfg.Roles[i].MemberOf[j])
+		r := &cfg.Roles[i]
+		path := fmt.Sprintf("roles[%d]", i)
+		r.Name = e.expand(path+".name", r.Name)
+		r.Password = e.expandSecret(path+".password", r.Password)
+		r.Strategy = e.expand(path+".strategy", r.Strategy)
+		for j := range r.MemberOf {
+			r.MemberOf[j] = e.expand(fmt.Sprintf("%s.member_of[%d]", path, j), r.MemberOf[j])
+		}
+		if r.Options.ValidUntil != nil {
+			validUntil := e.expand(path+".options.valid_until", *r.Options.ValidUntil)
+			r.Options.ValidUntil = &validUntil
 		}
 	}
 	for i := range cfg.Databases {
-		cfg.Databases[i].Name = expandEnvVars(cfg.Databases[i].Name)
-		cfg.Databases[i].Strategy = expandEnvVars(cfg.Databases[i].Strategy)
-		cfg.Databases[i].Owner = expandEnvVars(cfg.Databases[i].Owner)
-		opts := &cfg.Databases[i].Options
-		opts.Encoding = expandEnvVars(opts.Encoding)
-		opts.Locale = expandEnvVars(opts.Locale)
-		opts.LcCollate = expandEnvVars(opts.LcCollate)
-		opts.LcCtype = expandEnvVars(opts.LcCtype)
-		opts.Template = expandEnvVars(opts.Template)
-		for j := range cfg.Databases[i].Extensions {
-			cfg.Databases[i].Extensions[j] = expandEnvVars(cfg.Databases[i].Extensions[j])
+		d := &cfg.Databases[i]
+		path := fmt.Sprintf("databases[%d]", i)
+		d.Name = e.expand(path+".name", d.Name)
+		d.Strategy = e.expand(path+".strategy", d.Strategy)
+		d.Owner = e.expand(path+".owner", d.Owner)
+		d.Options.Encoding = e.expand(path+".options.encoding", d.Options.Encoding)
+		d.Options.Locale = e.expand(path+".options.locale", d.Options.Locale)
+		d.Options.LcCollate = e.expand(path+".options.lc_collate", d.Options.LcCollate)
+		d.Options.LcCtype = e.expand(path+".options.lc_ctype", d.Options.LcCtype)
+		d.Options.Template = e.expand(path+".options.template", d.Options.Template)
+		for j := range d.Extensions {
+			d.Extensions[j] = e.expand(fmt.Sprintf("%s.extensions[%d]", path, j), d.Extensions[j])
 		}
-		for j := range cfg.Databases[i].Schemas {
-			cfg.Databases[i].Schemas[j].Name = expandEnvVars(cfg.Databases[i].Schemas[j].Name)
-			cfg.Databases[i].Schemas[j].Owner = expandEnvVars(cfg.Databases[i].Schemas[j].Owner)
+		for j := range d.Schemas {
+			sPath := fmt.Sprintf("%s.schemas[%d]", path, j)
+			d.Schemas[j].Name = e.expand(sPath+".name", d.Schemas[j].Name)
+			d.Schemas[j].Owner = e.expand(sPath+".owner", d.Schemas[j].Owner)
 		}
-		if cfg.Databases[i].Migrations != nil {
-			cfg.Databases[i].Migrations.Directory = expandEnvVars(cfg.Databases[i].Migrations.Directory)
+		if d.Migrations != nil {
+			d.Migrations.Directory = e.expand(path+".migrations.directory", d.Migrations.Directory)
 		}
-		for j := range cfg.Databases[i].Grants {
-			cfg.Databases[i].Grants[j].Role = expandEnvVars(cfg.Databases[i].Grants[j].Role)
-			cfg.Databases[i].Grants[j].OnSchema = expandEnvVars(cfg.Databases[i].Grants[j].OnSchema)
-			cfg.Databases[i].Grants[j].OnTablesInSchema = expandEnvVars(cfg.Databases[i].Grants[j].OnTablesInSchema)
-			for k := range cfg.Databases[i].Grants[j].Privileges {
-				cfg.Databases[i].Grants[j].Privileges[k] = expandEnvVars(cfg.Databases[i].Grants[j].Privileges[k])
+		for j := range d.Grants {
+			g := &d.Grants[j]
+			gPath := fmt.Sprintf("%s.grants[%d]", path, j)
+			g.Role = e.expand(gPath+".role", g.Role)
+			g.OnSchema = e.expand(gPath+".on_schema", g.OnSchema)
+			g.OnTablesInSchema = e.expand(gPath+".on_tables_in_schema", g.OnTablesInSchema)
+			for k := range g.Privileges {
+				g.Privileges[k] = e.expand(fmt.Sprintf("%s.privileges[%d]", gPath, k), g.Privileges[k])
 			}
 		}
 	}
+	return e.err()
 }
 
 // Load reads and parses a YAML config file, expanding env vars and validating.
@@ -206,7 +205,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config YAML: %w", err)
 	}
 
-	expandConfig(&cfg)
+	if err := expandConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("expanding environment variables: %w", err)
+	}
 
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)

@@ -20,24 +20,8 @@ var version = "dev"
 func main() {
 	setupLogging()
 
-	migrationsDefault := true
-	if raw := os.Getenv("MIGRATIONS_ENABLED"); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			slog.Error("Invalid MIGRATIONS_ENABLED value (expected true/false/1/0)", "value", raw)
-			os.Exit(1)
-		}
-		migrationsDefault = parsed
-	}
-	dryRunDefault := false
-	if raw := os.Getenv("DRY_RUN"); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			slog.Error("Invalid DRY_RUN value (expected true/false/1/0)", "value", raw)
-			os.Exit(1)
-		}
-		dryRunDefault = parsed
-	}
+	migrationsDefault := boolEnvOrDefault("MIGRATIONS_ENABLED", true)
+	dryRunDefault := boolEnvOrDefault("DRY_RUN", false)
 	showVersion := flag.Bool("version", false, "print version and exit")
 	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
 	dryRun := flag.Bool("dry-run", dryRunDefault, "log mutations as a preview without executing them (env: DRY_RUN)")
@@ -100,6 +84,10 @@ func main() {
 }
 
 func setupLogging() {
+	// Install the JSON handler before resolving LOG_LEVEL: resolving it can fail (e.g.
+	// both LOG_LEVEL and LOG_LEVEL_FILE set) and that error must be logged as JSON too.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	level := slog.LevelInfo
 	switch envOrDefault("LOG_LEVEL", "info") {
 	case "debug":
@@ -112,18 +100,60 @@ func setupLogging() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
+// resolveEnv returns the value of key, falling back to the file named by key_FILE.
+// An empty value is treated as unset and returned as "".
+func resolveEnv(key string) (string, error) {
+	val, _, err := config.LookupEnvOrFile(key)
+	return val, err
+}
+
 func requireEnv(key string) string {
-	val := os.Getenv(key)
+	val, err := resolveEnv(key)
+	if err != nil {
+		slog.Error("Invalid environment variable", "variable", key, "error", err)
+		os.Exit(1)
+	}
 	if val == "" {
-		slog.Error("Required environment variable not set", "variable", key)
+		slog.Error("Required environment variable not set", "variable", key, "file_variable", key+"_FILE")
 		os.Exit(1)
 	}
 	return val
 }
 
 func envOrDefault(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
+	val, err := resolveEnv(key)
+	if err != nil {
+		slog.Error("Invalid environment variable", "variable", key, "error", err)
+		os.Exit(1)
+	}
+	if val != "" {
 		return val
 	}
 	return defaultVal
+}
+
+// boolEnvOrDefault parses key (or the file named by key_FILE) as a boolean, returning
+// defaultVal when it is unset or empty. Invalid values are fatal.
+func boolEnvOrDefault(key string, defaultVal bool) bool {
+	val, err := parseBoolEnv(key, defaultVal)
+	if err != nil {
+		slog.Error("Invalid environment variable", "variable", key, "error", err)
+		os.Exit(1)
+	}
+	return val
+}
+
+func parseBoolEnv(key string, defaultVal bool) (bool, error) {
+	raw, err := resolveEnv(key)
+	if err != nil {
+		return false, err
+	}
+	if raw == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s value %q (expected true/false/1/0)", key, raw)
+	}
+	return parsed, nil
 }
