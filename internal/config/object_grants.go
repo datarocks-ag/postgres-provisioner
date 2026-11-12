@@ -75,7 +75,7 @@ func validateObjectGrant(path string, g Grant) error {
 	}
 	if len(g.Columns) > 0 {
 		for k, priv := range g.Privileges {
-			if !columnPrivileges[strings.ToUpper(strings.TrimSpace(priv))] {
+			if !columnPrivileges[normalizePrivilege(priv)] {
 				return fmt.Errorf("%s.privileges[%d]: privilege %q is not valid with columns (allowed: %s)",
 					path, k, priv, strings.Join(sortedPrivileges(columnPrivileges), ", "))
 			}

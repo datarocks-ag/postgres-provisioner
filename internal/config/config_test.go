@@ -1440,3 +1440,31 @@ databases:
 		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
 	}
 }
+
+func TestValidationRevokeAllCombinedWithOtherPrivileges(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    revokes:
+      - { role: "PUBLIC", privileges: ["ALL", "CONNECT"], on_database: true }
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "databases[0].revokes[0].privileges[0]: ALL cannot be combined with other privileges") {
+		t.Fatalf("expected ALL-combination error for revoke, got: %v", err)
+	}
+}
+
+func TestLoadReportsUnresolvedObjectGrantReference(t *testing.T) {
+	path := writeTempConfig(t, `
+roles:
+  - name: "reporting"
+databases:
+  - name: "db1"
+    grants:
+      - { role: "reporting", privileges: ["SELECT"], on_tables: ["app.users"], columns: ["${OBJ_COLUMN_UNSET}"] }
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "databases[0].grants[0].columns[0]: environment variable OBJ_COLUMN_UNSET is not set") {
+		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}

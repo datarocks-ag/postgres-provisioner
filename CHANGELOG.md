@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Grant privileges are validated per target** — e.g. `SELECT` with `on_database` or `USAGE` with `on_tables_in_schema` is now rejected when the config is loaded, instead of failing partway through provisioning with `invalid privilege type`. Only configs that could never apply successfully are affected.
 - A grant with both an invalid privilege and no (or multiple) targets now reports the target error first, since privileges are validated against the resolved target.
 - Null bytes in `on_schema` / `on_tables_in_schema` are now rejected during validation, like all other identifier fields.
-- **`ALL` can no longer be combined with other privileges** in the same grant (e.g. `[ALL, SELECT]`). PostgreSQL rejects such a `GRANT` with a syntax error, so these configs could never apply; they now fail at load time with a path-qualified error.
+- **`ALL` can no longer be combined with other privileges** in the same grant or revoke (e.g. `[ALL, SELECT]`). PostgreSQL rejects such a `GRANT` with a syntax error, so these configs could never apply; they now fail at load time with a path-qualified error.
 
 ## [1.3.0] - 2026-07-16
 
