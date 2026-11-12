@@ -1371,3 +1371,16 @@ func TestExpandPrivileges(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadReportsUnresolvedRevokeReference(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_schema: "${REVOKE_SCHEMA_UNSET}" }
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "databases[0].revokes[0].on_schema: environment variable REVOKE_SCHEMA_UNSET is not set") {
+		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}
