@@ -81,7 +81,7 @@ func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Option
 }
 
 // Run executes the full provisioning sequence:
-// Roles -> Role memberships -> Databases -> (per-db) Extensions -> Schemas -> Revokes -> Grants -> Migrations -> Object grants
+// Roles (+ settings) -> Role memberships -> Databases (+ settings) -> (per-db) Extensions -> Schemas -> Revokes -> Grants -> Migrations -> Object grants
 func (p *Provisioner) Run(ctx context.Context) error {
 	if p.opts.DryRun {
 		slog.Info("Starting provisioning in DRY RUN mode — no changes will be applied")
@@ -131,6 +131,10 @@ func (p *Provisioner) Run(ctx context.Context) error {
 			continue
 		}
 
+		if err := p.applyDatabaseSettings(ctx, database); err != nil {
+			return fmt.Errorf("provisioning settings for database %q: %w", database.Name, err)
+		}
+
 		// In dry-run mode, a "created" database wasn't actually created — connecting
 		// to it would block until the retry timeout expires. Log a summary of what
 		// would happen and skip the per-database connect/provision step. When the
@@ -161,6 +165,20 @@ func (p *Provisioner) Run(ctx context.Context) error {
 	}
 
 	slog.Info("Provisioning complete")
+	return nil
+}
+
+// applyDatabaseSettings applies database-wide settings and per-role settings within the
+// database. Both are stored in the shared catalog, so they go through the admin connection.
+func (p *Provisioner) applyDatabaseSettings(ctx context.Context, database config.Database) error {
+	if err := p.applySettings(ctx, databaseScope(database.Name), database.Settings); err != nil {
+		return err
+	}
+	for _, role := range config.SortedRoles(database.RoleSettings) {
+		if err := p.applySettings(ctx, roleInDatabaseScope(role, database.Name), database.RoleSettings[role]); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

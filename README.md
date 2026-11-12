@@ -122,6 +122,53 @@ on each database it should scrape.
   existing membership — the provisioner sees it as already granted. Fix it manually
   with `GRANT <group> TO <role> WITH INHERIT TRUE`, or revoke it and re-run.
 
+### Settings
+
+Run-time parameter defaults (`ALTER ROLE/DATABASE ... SET`) for roles, databases, and
+roles within one database. They take effect for new sessions.
+
+```yaml
+roles:
+  - name: "app_user"
+    settings:
+      statement_timeout: "30s"
+      search_path: ["app", "$user", "public"]   # list settings: one element per schema
+      work_mem: null                             # null resets (ALTER ROLE ... RESET)
+
+databases:
+  - name: "myapp"
+    settings:
+      TimeZone: "UTC"                            # ALTER DATABASE myapp SET timezone = 'UTC'
+    role_settings:
+      app_user:                                  # ALTER ROLE app_user IN DATABASE myapp SET ...
+        statement_timeout: "5min"
+```
+
+- Values are scalars (strings, numbers, booleans) or lists. Write list settings such as
+  `search_path` as a YAML list: `search_path: "app, public"` would name a single schema
+  called `app, public`. Values support `${VAR}` expansion.
+- Only settings whose stored value differs are changed. Removing a setting from the config
+  leaves it in place (additive); use `null` to reset it explicitly. Only the literal
+  `null` resets: an empty value (`work_mem:`) or `~` is rejected as a likely forgotten
+  value, and so are null or empty list elements.
+- Names are case-insensitive and validated (`[A-Za-z_][A-Za-z0-9_$]*`, optionally with a
+  `prefix.` for custom parameters). Whether PostgreSQL accepts a parameter for a role or
+  database (e.g. `shared_buffers` can't be set per role) is only checked when it's applied.
+- Use canonical parameter names as listed in `pg_settings`. Obsolete aliases such as
+  `sort_mem` are accepted by PostgreSQL but stored under the canonical name (`work_mem`),
+  so they never compare as up to date and are re-applied on every run.
+- With `strategy: create`, role `settings` are only applied to newly created roles.
+  Database `settings` and `role_settings` follow the database's strategy: they are only
+  applied when the database is newly created, regardless of the role's strategy.
+- Settings also apply to the provisioner's own sessions (it reconnects to each database as
+  the admin user). To keep them from breaking schema creation or migrations, every
+  provisioner connection starts with `statement_timeout=0`, `lock_timeout=0`,
+  `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off`
+  (connection startup options, which take precedence over role and database defaults).
+  `search_path` is deliberately not overridden: a database `search_path`, or one set for
+  the admin user, changes how unqualified names in migrations resolve. Schema-qualify
+  names in migrations or `SET search_path` at their top if that matters.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -146,8 +193,8 @@ Control whether existing resources are updated or skipped using the `strategy` f
 
 - `update` (default) — create resources if missing, update if they already exist
 - `create` — create resources if missing, skip if they already exist. For databases,
-  this also skips all sub-resources (extensions, schemas, grants) if the database
-  already exists.
+  this also skips all sub-resources (settings, `role_settings`, extensions, schemas,
+  grants) if the database already exists.
 
 Strategy can be set globally or per resource. Per-resource strategy overrides the global setting.
 
@@ -201,9 +248,9 @@ services:
 
 ## Provisioning Order
 
-1. **Roles** — created or updated idempotently
+1. **Roles** — created or updated idempotently, then role `settings`
 2. **Role memberships** — `GRANT <group> TO <role>` for each `member_of` entry not yet granted
-3. **Databases** — created idempotently, owner set
+3. **Databases** — created idempotently, owner set, then database `settings` and `role_settings`
 4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
 5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
 6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.

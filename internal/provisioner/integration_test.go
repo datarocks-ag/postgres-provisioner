@@ -71,6 +71,8 @@ func setupPostgres(t *testing.T) (*sql.DB, db.ConnConfig, func()) {
 		Port:     mappedPort.Port(),
 		DBName:   "postgres",
 		SSLMode:  "disable",
+		// As in main: protect provisioner sessions from managed role/database settings.
+		SessionParams: db.SafeSessionParams(),
 	}
 
 	cleanup := func() {
@@ -1652,5 +1654,287 @@ databases:
 	}
 	if err := reportingDB.QueryRowContext(ctx, `SELECT n FROM app.user_count`).Scan(&n); err != nil {
 		t.Errorf("SELECT on granted materialized view: %v", err)
+	}
+}
+
+// showSettingAs returns SHOW <setting> for a session of user in dbName, so role, database
+// and role-in-database defaults all apply.
+func showSettingAs(t *testing.T, connCfg db.ConnConfig, user, password, dbName, setting string) string {
+	t.Helper()
+	cfg := connCfg
+	cfg.User, cfg.Password, cfg.DBName = user, password, dbName
+	cfg.SessionParams = nil // observe the defaults as an application session would
+	conn, err := db.Connect(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect as %s: %v", user, err)
+	}
+	defer conn.Close()
+	var value string
+	if err := conn.QueryRowContext(context.Background(), "SHOW "+setting).Scan(&value); err != nil {
+		t.Fatalf("SHOW %s: %v", setting, err)
+	}
+	return value
+}
+
+// captureLogsDuring redirects slog to a buffer for the duration of fn and returns the output.
+func captureLogsDuring(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
+
+func TestIntegrationRoleAndDatabaseSettings(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+    settings:
+      statement_timeout: "30s"
+      search_path: ["app", "$user", "public"]
+
+databases:
+  - name: "settingsdb"
+    settings:
+      TimeZone: "Asia/Tokyo"
+    role_settings:
+      app:
+        work_mem: "8MB"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	want := map[string]string{
+		"statement_timeout": "30s",
+		"search_path":       `app, "$user", public`,
+		"TimeZone":          "Asia/Tokyo",
+		"work_mem":          "8MB",
+	}
+	for setting, expected := range want {
+		if got := showSettingAs(t, connCfg, "app", "apppass", "settingsdb", setting); got != expected {
+			t.Errorf("SHOW %s = %q, want %q", setting, got, expected)
+		}
+	}
+	// The role-in-database setting must not leak into other databases.
+	if got := showSettingAs(t, connCfg, "app", "apppass", "postgres", "work_mem"); got == "8MB" {
+		t.Error("work_mem from role_settings should only apply in settingsdb")
+	}
+
+	logs := captureLogsDuring(t, run)
+	if strings.Contains(logs, "Applying setting") {
+		t.Errorf("second run should not change any setting, logs:\n%s", logs)
+	}
+}
+
+func TestIntegrationSettingsRemovalIsAdditiveAndNullResets(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	runWith := func(settingsYAML string) {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    options: { login: true }
+`+settingsYAML))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	storedSettings := func() string {
+		t.Helper()
+		var stored sql.NullString
+		err := adminDB.QueryRowContext(ctx, `
+			SELECT array_to_string(s.setconfig, ';') FROM pg_db_role_setting s
+			JOIN pg_roles r ON r.oid = s.setrole
+			WHERE r.rolname = 'app' AND s.setdatabase = 0`).Scan(&stored)
+		if err != nil && err != sql.ErrNoRows {
+			t.Fatal(err)
+		}
+		return stored.String
+	}
+
+	runWith(`    settings:
+      statement_timeout: "30s"`)
+	if got := storedSettings(); got != "statement_timeout=30s" {
+		t.Fatalf("expected statement_timeout=30s, got %q", got)
+	}
+
+	runWith("")
+	if got := storedSettings(); got != "statement_timeout=30s" {
+		t.Errorf("removing the setting from config must not reset it, got %q", got)
+	}
+
+	runWith(`    settings:
+      statement_timeout: null`)
+	if got := storedSettings(); got != "" {
+		t.Errorf("null should reset statement_timeout, got %q", got)
+	}
+}
+
+func TestIntegrationDatabaseSettingsDoNotAffectProvisionerSession(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// Without the provisioner's session overrides, these database defaults would make
+	// CREATE SCHEMA and the migrations fail (read-only) or time out (pg_sleep).
+	migDir := t.TempDir()
+	writeMigrationFile(t, migDir, "V0001__create_items.sql",
+		"SELECT pg_sleep(0.05); CREATE TABLE items (id int);")
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+databases:
+  - name: "guarded"
+    owner: "app"
+    settings:
+      default_transaction_read_only: "on"
+      statement_timeout: "10ms"
+      lock_timeout: "10ms"
+      idle_in_transaction_session_timeout: "10ms"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+`, migDir))
+
+	ctx := context.Background()
+	run := func(name string) {
+		t.Helper()
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("%s run failed: %v", name, err)
+		}
+	}
+	run("first")
+
+	// Second run with a new migration: the settings are now in effect from the start.
+	writeMigrationFile(t, migDir, "V0002__more_items.sql",
+		"SELECT pg_sleep(0.05); CREATE TABLE more_items (id int);")
+	run("second")
+
+	// Application sessions still get the database defaults.
+	if got := showSettingAs(t, connCfg, "app", "apppass", "guarded", "default_transaction_read_only"); got != "on" {
+		t.Errorf("SHOW default_transaction_read_only = %q, want on", got)
+	}
+	if got := showSettingAs(t, connCfg, "app", "apppass", "guarded", "statement_timeout"); got != "10ms" {
+		t.Errorf("SHOW statement_timeout = %q, want 10ms", got)
+	}
+
+	guarded, err := db.ConnectToDatabase(ctx, connCfg, "guarded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guarded.Close()
+	var tables int
+	if err := guarded.QueryRowContext(ctx,
+		`SELECT count(*) FROM pg_tables WHERE tablename IN ('items', 'more_items')`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 2 {
+		t.Errorf("expected both migration tables, found %d", tables)
+	}
+}
+
+func TestIntegrationBooleanAndIntegerSettingsAreIdempotent(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// Unquoted YAML booleans and integers must round-trip through pg_db_role_setting.
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+    settings:
+      jit: false
+      work_mem: 65536
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	want := map[string]string{"jit": "off", "work_mem": "64MB"}
+	for setting, expected := range want {
+		if got := showSettingAs(t, connCfg, "app", "apppass", "postgres", setting); got != expected {
+			t.Errorf("SHOW %s = %q, want %q", setting, got, expected)
+		}
+	}
+
+	logs := captureLogsDuring(t, run)
+	if strings.Contains(logs, "Applying setting") {
+		t.Errorf("second run should not change any setting, logs:\n%s", logs)
+	}
+}
+
+func TestIntegrationSearchPathWithReservedKeywordIsIdempotent(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// "user" is a reserved keyword and "App" is mixed case: PostgreSQL stores both quoted.
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+    settings:
+      search_path: ["app", "user", "App", "$user"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	want := `app, "user", "App", "$user"`
+	if got := showSettingAs(t, connCfg, "app", "apppass", "postgres", "search_path"); got != want {
+		t.Errorf("SHOW search_path = %q, want %q", got, want)
+	}
+
+	logs := captureLogsDuring(t, run)
+	if strings.Contains(logs, "Applying setting") {
+		t.Errorf("second run should not change search_path, logs:\n%s", logs)
 	}
 }
