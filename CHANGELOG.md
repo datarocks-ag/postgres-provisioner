@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Role memberships (`member_of`)** — `roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`), including PostgreSQL predefined roles such as `pg_monitor`. This enables a least-privilege, non-superuser account for `postgres_exporter` instead of the admin user. Memberships are applied in a separate pass after all roles are provisioned (config order doesn't matter), already-granted memberships are skipped, nothing is ever revoked, and `strategy: create` skips memberships for pre-existing roles. Circular memberships among declared roles are rejected at validation. Supported in dry-run mode.
 - **`*_FILE` secret support** — every `${VAR}` reference falls back to the contents of the file named by `VAR_FILE` (Docker secrets / Kubernetes secret volumes; trailing newlines trimmed, max 64 KiB). The provisioner's own environment variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, …) accept `<NAME>_FILE` as well. Setting both `VAR` and `VAR_FILE` is an error.
 - **Default values** — `${VAR:-default}` uses `default` when the variable is unset or empty (POSIX/Docker Compose semantics); `${VAR:-}` marks a value as optional.
 - **Escape for a literal `${`** — `$${` yields `${` without expansion or validation (e.g. a password containing `${`).
@@ -37,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provisioner sessions ignore risky role/database defaults** — every provisioner connection sets `statement_timeout=0`, `lock_timeout=0`, `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off` as connection startup options, so settings such as a read-only database default or a short `statement_timeout` can't break schema creation or migrations. `search_path` is not overridden.
 - **Duplicate extensions in a database are rejected** at load time, as are unknown keys in an extension mapping (e.g. a misspelled `shema`).
 - **Schemas are now provisioned before extensions** (per database), so an extension can be installed into a schema the provisioner creates. `CREATE SCHEMA` never depends on an extension, but an extension without `schema` lands in the first existing schema of the admin connection's `search_path`: with the default `"$user", public`, a provisioned schema named like the admin login role now exists at that point and is chosen over `public`. Set `schema: public` explicitly to keep the previous placement.
+
+## [1.4.0] - 2026-11-12
+
+### Added
+
+- **Role memberships (`member_of`)** — `roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`), including PostgreSQL predefined roles such as `pg_monitor`. This enables a least-privilege, non-superuser account for `postgres_exporter` instead of the admin user. Memberships are applied in a separate pass after all roles are provisioned (config order doesn't matter), already-granted memberships are skipped, nothing is ever revoked, and `strategy: create` skips memberships for pre-existing roles. Circular memberships among declared roles are rejected at validation. Supported in dry-run mode.
 
 ## [1.3.0] - 2026-07-16
 
