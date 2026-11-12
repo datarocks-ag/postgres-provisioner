@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-12
+
 ### Added
 
 - **Role memberships (`member_of`)** — `roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`), including PostgreSQL predefined roles such as `pg_monitor`. This enables a least-privilege, non-superuser account for `postgres_exporter` instead of the admin user. Memberships are applied in a separate pass after all roles are provisioned (config order doesn't matter), already-granted memberships are skipped, nothing is ever revoked, and `strategy: create` skips memberships for pre-existing roles. Circular memberships among declared roles are rejected at validation. Supported in dry-run mode.
