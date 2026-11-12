@@ -52,7 +52,7 @@ func (dryRunResult) LastInsertId() (int64, error) { return 0, nil }
 func (dryRunResult) RowsAffected() (int64, error) { return 0, nil }
 
 // passwordLiteralPattern matches a PASSWORD '...' clause, accounting for Postgres's
-// doubled single-quote escaping inside string literals (e.g. 'it''s').
+// escaping of a single quote inside a string literal as two single quotes.
 var passwordLiteralPattern = regexp.MustCompile(`(?i)(PASSWORD\s+)'(?:[^']|'')*'`)
 
 // redactSecrets masks secret literals in SQL so the redacted form is safe to log.
