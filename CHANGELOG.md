@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-12
+
+This release makes config loading strict and contains breaking changes; see [Upgrading to 2.0](docs/upgrading-to-2.0.md).
+
 ### Added
 
 - **`*_FILE` secret support** — every `${VAR}` reference falls back to the contents of the file named by `VAR_FILE` (Docker secrets / Kubernetes secret volumes; trailing newlines trimmed, max 64 KiB). The provisioner's own environment variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, …) accept `<NAME>_FILE` as well. Setting both `VAR` and `VAR_FILE` is an error.
@@ -93,7 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
-[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.1.0...v1.2.0
