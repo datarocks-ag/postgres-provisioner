@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Go 1.27** — CI and release binaries are now built with Go 1.27, like the Docker image already was (Go 1.25 is no longer supported upstream). Building from source requires Go 1.26 or later.
 - **Go dependencies updated** — `github.com/testcontainers/testcontainers-go` and `/modules/postgres` 0.44.0 → 0.45.0 (integration tests only; not part of the binary).
+- **golangci-lint 2.11.4 → 2.15.0** — 2.11.4 panics while analyzing Go 1.27's standard library on Linux (`buildir: unexpected expr: *ast.KeyValueExpr`). Development tool only; the binary's dependencies are unchanged. The `go-header`/`sloglint` pins from 1.1.0 are no longer needed (`sloglint` moves to 0.12.0).
 
 ## [2.0.0] - 2026-11-12
 
