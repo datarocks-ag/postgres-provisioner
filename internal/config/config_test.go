@@ -1147,6 +1147,62 @@ databases:
 	}
 }
 
+func TestValidationAllCombinedWithOtherPrivileges(t *testing.T) {
+	tests := []struct {
+		name      string
+		grant     string
+		wantError string
+	}{
+		{"database", `privileges: ["CONNECT", "ALL"]
+        on_database: true`, "privileges[1]: ALL"},
+		{"schema", `privileges: ["all", "USAGE"]
+        on_schema: "app"`, "privileges[0]: ALL"},
+		{"tables in schema", `privileges: ["ALL", "SELECT"]
+        on_tables_in_schema: "app"`, "privileges[0]: ALL"},
+		{"sequences in schema", `privileges: ["USAGE", "ALL"]
+        on_sequences_in_schema: "app"`, "privileges[1]: ALL"},
+		{"functions in schema", `privileges: ["EXECUTE", "ALL"]
+        on_functions_in_schema: "app"`, "privileges[1]: ALL"},
+		{"tables", `privileges: ["ALL", "SELECT"]
+        on_tables: ["app.users"]`, "privileges[0]: ALL"},
+		{"columns", `privileges: ["SELECT", "ALL"]
+        on_tables: ["app.users"]
+        columns: ["id"]`, "privileges[1]: ALL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeTempConfig(t, `
+roles:
+  - name: "user1"
+databases:
+  - name: "db1"
+    grants:
+      - role: "user1"
+        `+tt.grant+`
+`))
+			want := "databases[0].grants[0]." + tt.wantError + " cannot be combined with other privileges"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected error containing %q, got: %v", want, err)
+			}
+		})
+	}
+}
+
+func TestValidationAllAlone(t *testing.T) {
+	_, err := Load(writeTempConfig(t, `
+roles:
+  - name: "user1"
+databases:
+  - name: "db1"
+    grants:
+      - { role: "user1", privileges: ["ALL"], on_tables: ["app.users"], columns: ["id"] }
+      - { role: "user1", privileges: ["ALL"], on_schema: "app" }
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestValidationNullByteInGrantTargets(t *testing.T) {
 	for _, field := range []string{"on_schema", "on_tables_in_schema", "on_sequences_in_schema", "on_functions_in_schema"} {
 		t.Run(field, func(t *testing.T) {

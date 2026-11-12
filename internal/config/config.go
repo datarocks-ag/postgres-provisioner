@@ -463,6 +463,10 @@ func validatePrivileges(path string, privileges []string, target GrantTarget) er
 			return fmt.Errorf("%s.privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
 				path, k, priv, target, strings.Join(sortedPrivileges(allowed), ", "))
 		}
+		// PostgreSQL accepts ALL only on its own: "ALL, SELECT" is a syntax error.
+		if normalized == "ALL" && len(privileges) > 1 {
+			return fmt.Errorf("%s.privileges[%d]: ALL cannot be combined with other privileges", path, k)
+		}
 	}
 	return nil
 }

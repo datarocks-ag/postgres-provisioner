@@ -213,7 +213,8 @@ services:
 
 ## Grant Types
 
-Each grant sets exactly one target. Privileges are validated per target when the config is loaded:
+Each grant sets exactly one target. Privileges are validated per target when the config is loaded,
+and `ALL` must be the only privilege in its grant:
 
 | Target | Applies to | Allowed privileges |
 |---|---|---|
