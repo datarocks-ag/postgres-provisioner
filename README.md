@@ -206,8 +206,9 @@ services:
 3. **Databases** — created idempotently, owner set
 4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
 5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
-6. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
-7. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
+6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
+7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
+8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
 
 ## Grant Types
 
@@ -240,6 +241,49 @@ grants:
 
 **Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
 matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.
+
+## Revokes
+
+The provisioner is otherwise additive, but `revokes` explicitly removes privileges —
+typically PostgreSQL's defaults for `PUBLIC` (every role), to harden a database:
+
+```yaml
+databases:
+  - name: "myapp"
+    revokes:
+      - { role: PUBLIC, privileges: [ALL], on_database: true }    # CONNECT + TEMPORARY + CREATE
+      - { role: PUBLIC, privileges: [CREATE], on_schema: public }
+    grants:
+      - { role: app_user, privileges: [CONNECT], on_database: true }
+```
+
+- Same shape as grants. Supported targets: `on_database` and `on_schema`.
+- `role` is a declared role or `PUBLIC` (case-insensitive), the pseudo-role covering every role.
+  New databases grant `CONNECT` and `TEMPORARY` to `PUBLIC` by default. Because any case means
+  the pseudo-role, declaring a role named `public` in any case (PostgreSQL allows quoted
+  `"PUBLIC"` or `"Public"`) is a config error.
+- Revokes run **before** grants, so revoking from `PUBLIC` and granting to specific roles converges.
+- Only privileges the grantee currently holds are revoked; otherwise the revoke is logged as
+  already applied and skipped.
+- A privilege both granted and revoked for the same role and object is a config error, as
+  are duplicate revokes.
+- `REVOKE` only removes grants made by a specific grantor. As a superuser, the provisioner
+  revokes as the object owner, removing the owner's grants (including the defaults). A
+  non-superuser revokes as itself (or as the owner, if it is a member of the owning role) and
+  removes only those grants; for others, PostgreSQL only emits a server `WARNING`, not an
+  error. Either way, if a privilege survives because another grantor granted it, the
+  provisioner logs a warning.
+- Revoking from a role only removes privileges granted to that role directly. The role still
+  has whatever it gets through `PUBLIC` or through membership in other roles: revoke from
+  `PUBLIC` (or from those roles) as well.
+- Revokes never use `CASCADE`. If the grantee holds a privilege `WITH GRANT OPTION` and has
+  granted it on to other roles, PostgreSQL rejects the `REVOKE` with "dependent privileges
+  exist" and the run fails with a hint. Revoke the dependent grants first (or run
+  `REVOKE ... CASCADE` manually if removing them is intended).
+- In dry-run, a revoke on a schema created in the same run is previewed against a new
+  schema's defaults: only its owner holds privileges, so revoking from `PUBLIC` would do nothing.
+- With `strategy: create`, revokes (like other per-database resources) only apply to newly
+  created databases. Use `strategy: update` to harden an existing database.
 
 ## Migrations
 

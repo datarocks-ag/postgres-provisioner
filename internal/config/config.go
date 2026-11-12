@@ -191,8 +191,11 @@ type Database struct {
 	Extensions []string        `yaml:"extensions"`
 	Schemas    []Schema        `yaml:"schemas"`
 	Grants     []Grant         `yaml:"grants"`
-	Migrations *Migrations     `yaml:"migrations"`
-	Strategy   string          `yaml:"strategy"`
+	// Revokes lists privileges to remove, applied before Grants. Only on_database and
+	// on_schema targets are supported; role may be PUBLIC.
+	Revokes    []Grant     `yaml:"revokes"`
+	Migrations *Migrations `yaml:"migrations"`
+	Strategy   string      `yaml:"strategy"`
 }
 
 // Config is the top-level YAML configuration.
@@ -244,19 +247,25 @@ func expandConfig(cfg *Config) error {
 			d.Migrations.Directory = e.expand(path+".migrations.directory", d.Migrations.Directory)
 		}
 		for j := range d.Grants {
-			g := &d.Grants[j]
-			gPath := fmt.Sprintf("%s.grants[%d]", path, j)
-			g.Role = e.expand(gPath+".role", g.Role)
-			g.OnSchema = e.expand(gPath+".on_schema", g.OnSchema)
-			g.OnTablesInSchema = e.expand(gPath+".on_tables_in_schema", g.OnTablesInSchema)
-			g.OnSequencesInSchema = e.expand(gPath+".on_sequences_in_schema", g.OnSequencesInSchema)
-			g.OnFunctionsInSchema = e.expand(gPath+".on_functions_in_schema", g.OnFunctionsInSchema)
-			for k := range g.Privileges {
-				g.Privileges[k] = e.expand(fmt.Sprintf("%s.privileges[%d]", gPath, k), g.Privileges[k])
-			}
+			e.expandGrant(fmt.Sprintf("%s.grants[%d]", path, j), &d.Grants[j])
+		}
+		for j := range d.Revokes {
+			e.expandGrant(fmt.Sprintf("%s.revokes[%d]", path, j), &d.Revokes[j])
 		}
 	}
 	return e.err()
+}
+
+// expandGrant expands env var references in a grant or revoke entry at path.
+func (e *expander) expandGrant(path string, g *Grant) {
+	g.Role = e.expand(path+".role", g.Role)
+	g.OnSchema = e.expand(path+".on_schema", g.OnSchema)
+	g.OnTablesInSchema = e.expand(path+".on_tables_in_schema", g.OnTablesInSchema)
+	g.OnSequencesInSchema = e.expand(path+".on_sequences_in_schema", g.OnSequencesInSchema)
+	g.OnFunctionsInSchema = e.expand(path+".on_functions_in_schema", g.OnFunctionsInSchema)
+	for k := range g.Privileges {
+		g.Privileges[k] = e.expand(fmt.Sprintf("%s.privileges[%d]", path, k), g.Privileges[k])
+	}
 }
 
 // Load reads and parses a YAML config file, expanding env vars and validating.
@@ -378,6 +387,178 @@ func validateMemberOfCycles(roles []Role) error {
 	return nil
 }
 
+// IsPublic reports whether role names the PUBLIC pseudo-role (case-insensitive).
+// PostgreSQL only reserves lowercase "public": quoted names such as "PUBLIC" or "Public"
+// are valid roles. validate rejects declaring any of them, so a name matching IsPublic in
+// a grant or revoke always means the pseudo-role.
+func IsPublic(role string) bool {
+	return strings.EqualFold(role, "PUBLIC")
+}
+
+// normalizePrivilege returns the canonical upper-case form of a privilege keyword.
+func normalizePrivilege(privilege string) string {
+	return strings.ToUpper(strings.TrimSpace(privilege))
+}
+
+// validateGrant checks a single grant entry. path is the entry's config path, e.g.
+// "databases[0].grants[1]".
+func validateGrant(path string, g Grant, roleNames map[string]bool) error {
+	if g.Role == "" {
+		return fmt.Errorf("%s: role is required", path)
+	}
+	if err := checkNullBytes(
+		struct{ path, value string }{path + ".role", g.Role},
+		struct{ path, value string }{path + ".on_schema", g.OnSchema},
+		struct{ path, value string }{path + ".on_tables_in_schema", g.OnTablesInSchema},
+		struct{ path, value string }{path + ".on_sequences_in_schema", g.OnSequencesInSchema},
+		struct{ path, value string }{path + ".on_functions_in_schema", g.OnFunctionsInSchema},
+	); err != nil {
+		return err
+	}
+	if !roleNames[g.Role] {
+		return fmt.Errorf("%s.role: role %q is not declared in roles", path, g.Role)
+	}
+	if len(g.Privileges) == 0 {
+		return fmt.Errorf("%s: privileges is required", path)
+	}
+	targets := g.Targets()
+	if len(targets) != 1 {
+		return fmt.Errorf("%s: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, or on_functions_in_schema is required", path)
+	}
+	return validatePrivileges(path, g.Privileges, targets[0])
+}
+
+// validatePrivileges checks privileges against the injection allowlist and the set
+// PostgreSQL accepts for target.
+func validatePrivileges(path string, privileges []string, target GrantTarget) error {
+	allowed := privilegesByTarget[target]
+	for k, priv := range privileges {
+		normalized := normalizePrivilege(priv)
+		if !validPrivileges[normalized] {
+			return fmt.Errorf("%s.privileges[%d]: invalid privilege %q", path, k, priv)
+		}
+		if !allowed[normalized] {
+			return fmt.Errorf("%s.privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
+				path, k, priv, target, strings.Join(sortedPrivileges(allowed), ", "))
+		}
+	}
+	return nil
+}
+
+// revocableTargets are the targets supported in revokes. Revoking on *_in_schema targets
+// would also need ALTER DEFAULT PRIVILEGES ... REVOKE, which is not implemented.
+var revocableTargets = map[GrantTarget]bool{
+	TargetDatabase: true,
+	TargetSchema:   true,
+}
+
+// validateRevoke checks a single revoke entry. Unlike grants, role may be PUBLIC.
+func validateRevoke(path string, r Grant, roleNames map[string]bool) error {
+	if r.Role == "" {
+		return fmt.Errorf("%s: role is required", path)
+	}
+	if err := checkNullBytes(
+		struct{ path, value string }{path + ".role", r.Role},
+		struct{ path, value string }{path + ".on_schema", r.OnSchema},
+	); err != nil {
+		return err
+	}
+	if !IsPublic(r.Role) && !roleNames[r.Role] {
+		return fmt.Errorf("%s.role: role %q is not declared in roles (use PUBLIC for all roles)", path, r.Role)
+	}
+	if len(r.Privileges) == 0 {
+		return fmt.Errorf("%s: privileges is required", path)
+	}
+	targets := r.Targets()
+	if len(targets) != 1 {
+		return fmt.Errorf("%s: exactly one of on_database or on_schema is required", path)
+	}
+	if !revocableTargets[targets[0]] {
+		return fmt.Errorf("%s: %s is not supported for revokes (supported: on_database, on_schema)", path, targets[0])
+	}
+	return validatePrivileges(path, r.Privileges, targets[0])
+}
+
+// ExpandPrivileges returns the concrete privileges a grant or revoke covers on target:
+// normalized, deduplicated, sorted, with ALL expanded and TEMP mapped to TEMPORARY.
+// The names match the privilege_type values reported by aclexplode().
+func ExpandPrivileges(target GrantTarget, privileges []string) []string {
+	set := make(map[string]bool)
+	for _, priv := range privileges {
+		switch normalized := normalizePrivilege(priv); normalized {
+		case "ALL":
+			for p := range privilegesByTarget[target] {
+				if p != "ALL" && p != "TEMP" {
+					set[p] = true
+				}
+			}
+		case "TEMP":
+			set["TEMPORARY"] = true
+		default:
+			set[normalized] = true
+		}
+	}
+	return sortedPrivileges(set)
+}
+
+// privilegeKey identifies one privilege of one grantee on one object, for comparing
+// grants with revokes.
+type privilegeKey struct {
+	role      string
+	target    GrantTarget
+	object    string
+	privilege string
+}
+
+func privilegeKeys(g Grant) []privilegeKey {
+	targets := g.Targets()
+	if len(targets) != 1 || !revocableTargets[targets[0]] {
+		return nil
+	}
+	role := g.Role
+	if IsPublic(role) {
+		role = "PUBLIC"
+	}
+	keys := make([]privilegeKey, 0, len(g.Privileges))
+	for _, priv := range ExpandPrivileges(targets[0], g.Privileges) {
+		keys = append(keys, privilegeKey{role: role, target: targets[0], object: g.OnSchema, privilege: priv})
+	}
+	return keys
+}
+
+// checkRevokeConflicts rejects revokes that contradict a grant (the result would depend
+// on execution order) or repeat another revoke.
+func checkRevokeConflicts(path string, d Database) error {
+	granted := make(map[privilegeKey]int)
+	for k, g := range d.Grants {
+		for _, key := range privilegeKeys(g) {
+			granted[key] = k
+		}
+	}
+	revoked := make(map[privilegeKey]int)
+	for j, r := range d.Revokes {
+		for _, key := range privilegeKeys(r) {
+			if k, ok := granted[key]; ok {
+				return fmt.Errorf("%s.revokes[%d]: conflicts with grants[%d] (role %q, %s on %s)",
+					path, j, k, key.role, key.privilege, describeTarget(key))
+			}
+			if prev, ok := revoked[key]; ok {
+				return fmt.Errorf("%s.revokes[%d]: duplicates revokes[%d] (role %q, %s on %s)",
+					path, j, prev, key.role, key.privilege, describeTarget(key))
+			}
+			revoked[key] = j
+		}
+	}
+	return nil
+}
+
+func describeTarget(key privilegeKey) string {
+	if key.target == TargetSchema {
+		return fmt.Sprintf("schema %q", key.object)
+	}
+	return "database"
+}
+
 // validate checks the config for required fields and consistency.
 func validate(cfg *Config) error {
 	if err := validateStrategy("strategy", cfg.Strategy); err != nil {
@@ -402,6 +583,9 @@ func validate(cfg *Config) error {
 		}
 		if err := checkNullBytes(nullByteFields...); err != nil {
 			return err
+		}
+		if IsPublic(r.Name) {
+			return fmt.Errorf("roles[%d].name: %q is reserved: grants and revokes treat PUBLIC in any case as the pseudo-role for all roles", i, r.Name)
 		}
 		if r.Options.ConnectionLimit != nil && *r.Options.ConnectionLimit < -1 {
 			return fmt.Errorf("roles[%d].options.connection_limit: must be >= -1, got %d", i, *r.Options.ConnectionLimit)
@@ -488,39 +672,17 @@ func validate(cfg *Config) error {
 		}
 
 		for j, g := range d.Grants {
-			if g.Role == "" {
-				return fmt.Errorf("databases[%d].grants[%d]: role is required", i, j)
-			}
-			if err := checkNullBytes(
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].role", i, j), g.Role},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_schema", i, j), g.OnSchema},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_tables_in_schema", i, j), g.OnTablesInSchema},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_sequences_in_schema", i, j), g.OnSequencesInSchema},
-				struct{ path, value string }{fmt.Sprintf("databases[%d].grants[%d].on_functions_in_schema", i, j), g.OnFunctionsInSchema},
-			); err != nil {
+			if err := validateGrant(fmt.Sprintf("databases[%d].grants[%d]", i, j), g, roleNames); err != nil {
 				return err
 			}
-			if !roleNames[g.Role] {
-				return fmt.Errorf("databases[%d].grants[%d].role: role %q is not declared in roles", i, j, g.Role)
+		}
+		for j, r := range d.Revokes {
+			if err := validateRevoke(fmt.Sprintf("databases[%d].revokes[%d]", i, j), r, roleNames); err != nil {
+				return err
 			}
-			if len(g.Privileges) == 0 {
-				return fmt.Errorf("databases[%d].grants[%d]: privileges is required", i, j)
-			}
-			targets := g.Targets()
-			if len(targets) != 1 {
-				return fmt.Errorf("databases[%d].grants[%d]: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, or on_functions_in_schema is required", i, j)
-			}
-			allowed := privilegesByTarget[targets[0]]
-			for k, priv := range g.Privileges {
-				normalized := strings.ToUpper(strings.TrimSpace(priv))
-				if !validPrivileges[normalized] {
-					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: invalid privilege %q", i, j, k, priv)
-				}
-				if !allowed[normalized] {
-					return fmt.Errorf("databases[%d].grants[%d].privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
-						i, j, k, priv, targets[0], strings.Join(sortedPrivileges(allowed), ", "))
-				}
-			}
+		}
+		if err := checkRevokeConflicts(fmt.Sprintf("databases[%d]", i), d); err != nil {
+			return err
 		}
 
 		if d.Migrations != nil {

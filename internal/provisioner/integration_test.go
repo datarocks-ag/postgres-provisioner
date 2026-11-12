@@ -3,12 +3,14 @@
 package provisioner_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1153,5 +1155,297 @@ databases:
 		if err := strangerDB.QueryRowContext(ctx, "SELECT "+fn).Scan(&answer); err == nil {
 			t.Errorf("expected stranger to be denied EXECUTE on %s", fn)
 		}
+	}
+}
+
+// TestIntegrationRevokePublicConnect hardens a database so only explicitly granted roles
+// can connect, and verifies a second run is a no-op.
+func TestIntegrationRevokePublicConnect(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+  - name: "outsider"
+    password: "outsiderpass"
+    options: { login: true }
+
+databases:
+  - name: "hardened"
+    revokes:
+      - { role: "PUBLIC", privileges: ["ALL"], on_database: true }
+    grants:
+      - { role: "app", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for run := 1; run <= 2; run++ {
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run %d failed: %v", run, err)
+		}
+	}
+
+	privilege := func(role, priv string) bool {
+		t.Helper()
+		var has bool
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT has_database_privilege($1, 'hardened', $2)`, role, priv,
+		).Scan(&has); err != nil {
+			t.Fatal(err)
+		}
+		return has
+	}
+	if privilege("outsider", "CONNECT") {
+		t.Error("expected outsider to lose CONNECT after revoking from PUBLIC")
+	}
+	if privilege("outsider", "TEMPORARY") {
+		t.Error("expected outsider to lose TEMPORARY after revoking ALL from PUBLIC")
+	}
+	if !privilege("app", "CONNECT") {
+		t.Error("expected app to keep CONNECT via its explicit grant")
+	}
+
+	appDB := connectAs(t, connCfg, "app", "apppass", "hardened")
+	if err := appDB.PingContext(ctx); err != nil {
+		t.Errorf("app should be able to connect: %v", err)
+	}
+}
+
+// TestIntegrationRevokeCreateOnPublicSchema revokes CREATE on the public schema from
+// PUBLIC. PostgreSQL 15+ already denies it by default, so the test grants it first to
+// exercise an actual revoke (and the "already revoked" path on the first run).
+func TestIntegrationRevokeCreateOnPublicSchema(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "someone"
+    options: { login: true }
+
+databases:
+  - name: "schemahardening"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CREATE"], on_schema: "public" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	dbConn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "schemahardening")
+	if _, err := dbConn.ExecContext(ctx, `GRANT CREATE ON SCHEMA public TO PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	canCreate := func() bool {
+		t.Helper()
+		var has bool
+		if err := dbConn.QueryRowContext(ctx,
+			`SELECT has_schema_privilege('someone', 'public', 'CREATE')`,
+		).Scan(&has); err != nil {
+			t.Fatal(err)
+		}
+		return has
+	}
+	if !canCreate() {
+		t.Fatal("precondition: expected someone to have CREATE via PUBLIC")
+	}
+
+	run()
+	if canCreate() {
+		t.Error("expected CREATE on schema public to be revoked from PUBLIC")
+	}
+}
+
+// captureLogs redirects the default slog logger to a buffer until the test ends.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	return &buf
+}
+
+// TestIntegrationRevokeWarnsOnOtherGrantor revokes CONNECT from PUBLIC when a non-owner
+// role also granted it to PUBLIC. REVOKE (run as superuser, i.e. as the owner) only
+// removes the owner's grant, so the privilege survives and a warning must be logged.
+func TestIntegrationRevokeWarnsOnOtherGrantor(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE ROLE delegate`,
+		`CREATE ROLE outsider LOGIN`,
+		`CREATE DATABASE othergrantor`,
+		`GRANT CONNECT ON DATABASE othergrantor TO delegate WITH GRANT OPTION`,
+		// One round trip, so SET ROLE applies to the GRANT on the same pooled connection.
+		`SET ROLE delegate; GRANT CONNECT ON DATABASE othergrantor TO PUBLIC; RESET ROLE`,
+	} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "othergrantor"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "different grantor") {
+		t.Errorf("expected different-grantor warning, got logs:\n%s", out)
+	}
+
+	var grantors []string
+	rows, err := adminDB.QueryContext(ctx, `SELECT g.rolname
+		FROM pg_database d
+		CROSS JOIN LATERAL aclexplode(d.datacl) a
+		JOIN pg_roles g ON g.oid = a.grantor
+		WHERE d.datname = 'othergrantor' AND a.grantee = 0 AND a.privilege_type = 'CONNECT'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var grantor string
+		if err := rows.Scan(&grantor); err != nil {
+			t.Fatal(err)
+		}
+		grantors = append(grantors, grantor)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(grantors, ",") != "delegate" {
+		t.Errorf("expected only delegate's CONNECT grant to PUBLIC to remain, got grantors %v", grantors)
+	}
+
+	var outsiderCanConnect bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT has_database_privilege('outsider', 'othergrantor', 'CONNECT')`,
+	).Scan(&outsiderCanConnect); err != nil {
+		t.Fatal(err)
+	}
+	if !outsiderCanConnect {
+		t.Error("expected outsider to keep CONNECT through delegate's grant to PUBLIC")
+	}
+}
+
+// TestIntegrationRevokeFailsOnDependentPrivileges revokes CONNECT from a role that
+// re-granted it WITH GRANT OPTION. The provisioner doesn't cascade, so REVOKE fails; the
+// error must explain why and the privileges must stay untouched.
+func TestIntegrationRevokeFailsOnDependentPrivileges(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE ROLE delegate`,
+		`CREATE ROLE downstream`,
+		`CREATE DATABASE dependent`,
+		`GRANT CONNECT ON DATABASE dependent TO delegate WITH GRANT OPTION`,
+		// One round trip, so SET ROLE applies to the GRANT on the same pooled connection.
+		`SET ROLE delegate; GRANT CONNECT ON DATABASE dependent TO downstream; RESET ROLE`,
+	} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "delegate"
+databases:
+  - name: "dependent"
+    revokes:
+      - { role: "delegate", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx)
+	if err == nil {
+		t.Fatal("expected REVOKE to fail on dependent privileges")
+	}
+	for _, want := range []string{"dependent privileges exist", "WITH GRANT OPTION", "CASCADE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected error to contain %q, got: %v", want, err)
+		}
+	}
+
+	var downstreamCanConnect bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT has_database_privilege('downstream', 'dependent', 'CONNECT')`,
+	).Scan(&downstreamCanConnect); err != nil {
+		t.Fatal(err)
+	}
+	if !downstreamCanConnect {
+		t.Error("expected downstream to keep CONNECT: the provisioner must not cascade")
+	}
+}
+
+// TestIntegrationRevokeSkippedForExistingDatabaseWithCreateStrategy: strategy=create only
+// provisions sub-resources of newly created databases, so revokes leave an existing
+// database untouched.
+func TestIntegrationRevokeSkippedForExistingDatabaseWithCreateStrategy(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{`CREATE ROLE outsider LOGIN`, `CREATE DATABASE preexisting`} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	cfg, err := config.Load(writeTestConfig(t, `
+strategy: create
+databases:
+  - name: "preexisting"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
+
+	var outsiderCanConnect bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT has_database_privilege('outsider', 'preexisting', 'CONNECT')`,
+	).Scan(&outsiderCanConnect); err != nil {
+		t.Fatal(err)
+	}
+	if !outsiderCanConnect {
+		t.Error("expected strategy=create to skip revokes on the existing database")
 	}
 }

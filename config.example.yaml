@@ -62,7 +62,16 @@ databases:
     schemas:
       - name: "app"
         owner: "app_user"             # optional, defaults to database owner
+    revokes:                          # optional: applied before grants
+      - role: "PUBLIC"                # PUBLIC = every role
+        privileges: ["CONNECT"]
+        on_database: true             # REVOKE CONNECT ON DATABASE myapp FROM PUBLIC
+
     grants:
+      - role: "app_user"
+        privileges: ["CONNECT"]
+        on_database: true             # needed once CONNECT is revoked from PUBLIC
+
       - role: "app_user"
         privileges: ["ALL"]
         on_schema: "app"              # GRANT ALL ON SCHEMA app TO app_user
