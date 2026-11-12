@@ -209,10 +209,12 @@ services:
 6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
 7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
 8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
+9. **Object grants** — `on_tables` grants (per-database), after migrations so they can target tables migrations create.
 
 ## Grant Types
 
-Each grant sets exactly one target. Privileges are validated per target when the config is loaded:
+Each grant sets exactly one target. Privileges are validated per target when the config is loaded,
+and `ALL` must be the only privilege in its grant:
 
 | Target | Applies to | Allowed privileges |
 |---|---|---|
@@ -221,6 +223,7 @@ Each grant sets exactly one target. Privileges are validated per target when the
 | `on_tables_in_schema: "name"` | all tables in the schema | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `ALL` |
 | `on_sequences_in_schema: "name"` | all sequences in the schema | `USAGE`, `SELECT`, `UPDATE`, `ALL` |
 | `on_functions_in_schema: "name"` | all functions and procedures in the schema | `EXECUTE`, `ALL` |
+| `on_tables: ["schema.table", ...]` | specific tables (optionally `columns`) | table privileges; with `columns`: `SELECT`, `INSERT`, `UPDATE`, `REFERENCES`, `ALL` |
 
 The `*_in_schema` targets grant on all existing objects and set `ALTER DEFAULT PRIVILEGES`
 for objects created later, both by the provisioning user (e.g. via migrations) and by the
@@ -238,6 +241,39 @@ grants:
   - { role: app, privileges: [SELECT, INSERT, UPDATE, DELETE], on_tables_in_schema: app }
   - { role: app, privileges: [USAGE, SELECT], on_sequences_in_schema: app }
 ```
+
+**Specific tables and columns:**
+
+```yaml
+grants:
+  - role: reporting
+    privileges: [SELECT]
+    on_tables: ["app.users", "app.orders"]   # schema-qualified, used verbatim (case-sensitive)
+    columns: ["id", "email"]                 # optional: GRANT SELECT ("id", "email") ON TABLE ...
+```
+
+`on_tables` grants run **after migrations**, so they can target tables created by them in
+the same run. Unlike the `*_in_schema` targets they don't set default privileges.
+What happens to a table that still doesn't exist depends on whether this run ran migrations
+for the database:
+
+| Migrations for the database | Missing table |
+|---|---|
+| configured and enabled | provisioning fails, naming the missing tables (dry-run only logs them, since migrations are only previewed) |
+| disabled (`MIGRATIONS_ENABLED=false`) or not configured | warning naming the missing tables; the grant is applied to the tables that exist, and the next run picks up the rest |
+
+The second case covers applications that run their own migrations, e.g. with the provisioner
+as an init container: on a fresh database the tables don't exist yet, so the grant is
+completed by the next provisioning run after the application created them.
+
+Besides tables (including partitioned tables), `on_tables` accepts **views, materialized
+views and foreign tables**. Other relations such as indexes, sequences or composite types
+are rejected with an error naming their kind (use `on_sequences_in_schema` for sequences).
+
+Table and column names are quoted for you and matched **case-sensitively**: `App.Orders`
+targets `"App"."Orders"`, not `app.orders`. Write them unquoted — names containing `"` are
+rejected at load time. If a table isn't found but exists with different case, the error
+suggests the matching name.
 
 **Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
 matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.

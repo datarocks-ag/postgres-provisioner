@@ -105,6 +105,11 @@ databases:
       #   privileges: ["USAGE", "SELECT"]
       #   on_sequences_in_schema: "app"
 
+      # - role: "readonly_user"
+      #   privileges: ["SELECT"]
+      #   on_tables: ["app.users"]      # specific tables (schema.table), applied after migrations
+      #   columns: ["id", "email"]      # optional column-level grant
+
     # migrations:                       # optional: Flyway-style SQL migrations
     #   directory: "./migrations/myapp" # supports ${VAR} expansion
     #                                   # File naming:

@@ -39,6 +39,7 @@ var privilegesByTarget = map[GrantTarget]map[string]bool{
 	TargetTablesInSchema:    privilegeSet("ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
 	TargetSequencesInSchema: privilegeSet("ALL", "USAGE", "SELECT", "UPDATE"),
 	TargetFunctionsInSchema: privilegeSet("ALL", "EXECUTE"),
+	TargetTables:            privilegeSet("ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"),
 }
 
 func privilegeSet(privileges ...string) map[string]bool {
@@ -121,6 +122,17 @@ type Grant struct {
 	OnTablesInSchema    string   `yaml:"on_tables_in_schema"`
 	OnSequencesInSchema string   `yaml:"on_sequences_in_schema"`
 	OnFunctionsInSchema string   `yaml:"on_functions_in_schema"`
+	// OnTables lists schema-qualified tables (schema.table). These grants run after
+	// migrations, since the tables are usually created by them.
+	OnTables []string `yaml:"on_tables"`
+	// Columns restricts an on_tables grant to these columns.
+	Columns []string `yaml:"columns"`
+}
+
+// IsObjectGrant reports whether the grant targets individual objects (on_tables), which
+// are granted after migrations instead of with the schema-level grants.
+func (g Grant) IsObjectGrant() bool {
+	return len(g.OnTables) > 0
 }
 
 // GrantTarget identifies the kind of object a grant applies to. Its value is the YAML key.
@@ -133,6 +145,7 @@ const (
 	TargetTablesInSchema    GrantTarget = "on_tables_in_schema"
 	TargetSequencesInSchema GrantTarget = "on_sequences_in_schema"
 	TargetFunctionsInSchema GrantTarget = "on_functions_in_schema"
+	TargetTables            GrantTarget = "on_tables"
 )
 
 // Targets returns every target set on the grant. A valid grant has exactly one.
@@ -152,6 +165,9 @@ func (g Grant) Targets() []GrantTarget {
 	}
 	if g.OnFunctionsInSchema != "" {
 		targets = append(targets, TargetFunctionsInSchema)
+	}
+	if len(g.OnTables) > 0 {
+		targets = append(targets, TargetTables)
 	}
 	return targets
 }
@@ -263,6 +279,12 @@ func (e *expander) expandGrant(path string, g *Grant) {
 	g.OnTablesInSchema = e.expand(path+".on_tables_in_schema", g.OnTablesInSchema)
 	g.OnSequencesInSchema = e.expand(path+".on_sequences_in_schema", g.OnSequencesInSchema)
 	g.OnFunctionsInSchema = e.expand(path+".on_functions_in_schema", g.OnFunctionsInSchema)
+	for k := range g.OnTables {
+		g.OnTables[k] = e.expand(fmt.Sprintf("%s.on_tables[%d]", path, k), g.OnTables[k])
+	}
+	for k := range g.Columns {
+		g.Columns[k] = e.expand(fmt.Sprintf("%s.columns[%d]", path, k), g.Columns[k])
+	}
 	for k := range g.Privileges {
 		g.Privileges[k] = e.expand(fmt.Sprintf("%s.privileges[%d]", path, k), g.Privileges[k])
 	}
@@ -423,7 +445,7 @@ func validateGrant(path string, g Grant, roleNames map[string]bool) error {
 	}
 	targets := g.Targets()
 	if len(targets) != 1 {
-		return fmt.Errorf("%s: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, or on_functions_in_schema is required", path)
+		return fmt.Errorf("%s: exactly one of on_database, on_schema, on_tables_in_schema, on_sequences_in_schema, on_functions_in_schema, or on_tables is required", path)
 	}
 	return validatePrivileges(path, g.Privileges, targets[0])
 }
@@ -440,6 +462,10 @@ func validatePrivileges(path string, privileges []string, target GrantTarget) er
 		if !allowed[normalized] {
 			return fmt.Errorf("%s.privileges[%d]: privilege %q is not valid for %s (allowed: %s)",
 				path, k, priv, target, strings.Join(sortedPrivileges(allowed), ", "))
+		}
+		// PostgreSQL accepts ALL only on its own: "ALL, SELECT" is a syntax error.
+		if normalized == "ALL" && len(privileges) > 1 {
+			return fmt.Errorf("%s.privileges[%d]: ALL cannot be combined with other privileges", path, k)
 		}
 	}
 	return nil
@@ -672,7 +698,11 @@ func validate(cfg *Config) error {
 		}
 
 		for j, g := range d.Grants {
-			if err := validateGrant(fmt.Sprintf("databases[%d].grants[%d]", i, j), g, roleNames); err != nil {
+			grantPath := fmt.Sprintf("databases[%d].grants[%d]", i, j)
+			if err := validateGrant(grantPath, g, roleNames); err != nil {
+				return err
+			}
+			if err := validateObjectGrant(grantPath, g); err != nil {
 				return err
 			}
 		}

@@ -81,7 +81,7 @@ func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Option
 }
 
 // Run executes the full provisioning sequence:
-// Roles -> Role memberships -> Databases -> (per-db) Extensions -> Schemas -> Revokes -> Grants -> Migrations
+// Roles -> Role memberships -> Databases -> (per-db) Extensions -> Schemas -> Revokes -> Grants -> Migrations -> Object grants
 func (p *Provisioner) Run(ctx context.Context) error {
 	if p.opts.DryRun {
 		slog.Info("Starting provisioning in DRY RUN mode — no changes will be applied")
@@ -190,25 +190,49 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		}
 	}
 
-	// 7. Grants (always applied — GRANT is idempotent)
+	// 7. Schema-level grants (always applied — GRANT is idempotent)
 	for _, grant := range database.Grants {
+		if grant.IsObjectGrant() {
+			continue
+		}
 		if err := p.applyGrant(ctx, dbConn, database, grant); err != nil {
 			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
 		}
 	}
 
 	// 8. Migrations
-	if database.Migrations != nil && database.Migrations.Directory != "" {
-		if !p.opts.MigrationsEnabled {
-			slog.Info("Migrations disabled, skipping", "database", database.Name)
-			return nil
+	migrations, err := p.migrateDatabase(ctx, dbConn, database)
+	if err != nil {
+		return err
+	}
+
+	// 9. Object grants (on_tables) — after migrations, which usually create the tables
+	for _, grant := range database.Grants {
+		if !grant.IsObjectGrant() {
+			continue
 		}
-		if err := p.runMigrations(ctx, dbConn, database.Name, *database.Migrations); err != nil {
-			return fmt.Errorf("running migrations for database %q: %w", database.Name, err)
+		if err := p.grantOnTables(ctx, dbConn, grant, migrations); err != nil {
+			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
 		}
 	}
 
 	return nil
+}
+
+// migrateDatabase runs the database's migrations if configured and enabled, and reports
+// which of those applied.
+func (p *Provisioner) migrateDatabase(ctx context.Context, dbConn *sql.DB, database config.Database) (migrationStatus, error) {
+	if database.Migrations == nil || database.Migrations.Directory == "" {
+		return migrationsNotConfigured, nil
+	}
+	if !p.opts.MigrationsEnabled {
+		slog.Info("Migrations disabled, skipping", "database", database.Name)
+		return migrationsDisabled, nil
+	}
+	if err := p.runMigrations(ctx, dbConn, database.Name, *database.Migrations); err != nil {
+		return migrationsRan, fmt.Errorf("running migrations for database %q: %w", database.Name, err)
+	}
+	return migrationsRan, nil
 }
 
 // quoteIdentifier quotes a PostgreSQL identifier to prevent SQL injection.
