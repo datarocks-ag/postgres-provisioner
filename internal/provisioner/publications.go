@@ -147,6 +147,17 @@ func parseTables(raw []string) ([]config.QualifiedName, error) {
 	return tables, nil
 }
 
+// publicationRelationsQuery lists the tables explicitly added to a publication (FOR TABLE /
+// ADD TABLE). pg_publication_tables can't be used: it expands a partitioned table into its
+// leaf partitions (with publish_via_partition_root=false) and, on PG15+, includes tables
+// published via FOR TABLES IN SCHEMA, so neither would match the configured tables.
+const publicationRelationsQuery = `SELECT n.nspname, c.relname
+FROM pg_publication_rel pr
+JOIN pg_publication p ON p.oid = pr.prpubid
+JOIN pg_class c ON c.oid = pr.prrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE p.pubname = $1`
+
 // currentPublication returns the publication's definition, or nil if it doesn't exist.
 func currentPublication(ctx context.Context, dbConn *sql.DB, name string) (*publicationState, error) {
 	var allTables, insert, update, del, truncate bool
@@ -171,8 +182,7 @@ func currentPublication(ctx context.Context, dbConn *sql.DB, name string) (*publ
 		return state, nil
 	}
 
-	rows, err := dbConn.QueryContext(ctx,
-		`SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = $1`, name)
+	rows, err := dbConn.QueryContext(ctx, publicationRelationsQuery, name)
 	if err != nil {
 		return nil, fmt.Errorf("reading tables of publication %q: %w", name, err)
 	}
@@ -180,7 +190,7 @@ func currentPublication(ctx context.Context, dbConn *sql.DB, name string) (*publ
 	for rows.Next() {
 		var schema, table string
 		if err := rows.Scan(&schema, &table); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading tables of publication %q: %w", name, err)
 		}
 		state.tables[config.QualifiedName{Schema: schema, Name: table}.String()] = true
 	}

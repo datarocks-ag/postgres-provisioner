@@ -2267,3 +2267,71 @@ databases:
 		t.Error("publication should still be created when wal_level is not logical")
 	}
 }
+
+// runProvisioning loads yaml, runs the provisioner with opts and returns the captured logs.
+func runProvisioning(t *testing.T, adminDB *sql.DB, connCfg db.ConnConfig, opts provisioner.Options, yaml string) (string, error) {
+	t.Helper()
+	cfg, err := config.Load(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+	err = provisioner.New(adminDB, connCfg, cfg, opts).Run(context.Background())
+	return logs.String(), err
+}
+
+// TestIntegrationPublicationPartitionedTable verifies that a partitioned table is recognized
+// as already published on the next run. pg_publication_tables lists its leaf partitions
+// instead, which made the second run try to add the table again and fail.
+func TestIntegrationPublicationPartitionedTable(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t, "-c", "wal_level=logical")
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__events.sql", `
+CREATE TABLE app.events (id int, created date) PARTITION BY RANGE (created);
+CREATE TABLE app.events_2026 PARTITION OF app.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+`)
+	yaml := fmt.Sprintf(`
+databases:
+  - name: "partdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: ["app.events"]
+`, migrationsDir)
+
+	for run := 1; run <= 2; run++ {
+		logs, err := runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(), yaml)
+		if err != nil {
+			t.Fatalf("run %d failed: %v\nlogs:\n%s", run, err, logs)
+		}
+		if strings.Contains(logs, "not in config") {
+			t.Errorf("run %d: unexpected extra-table warning, logs:\n%s", run, logs)
+		}
+		if run == 2 && strings.Contains(logs, "Adding tables") {
+			t.Errorf("run 2 should not add tables, logs:\n%s", logs)
+		}
+	}
+
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "partdb")
+	var members string
+	err := conn.QueryRowContext(context.Background(), `
+		SELECT string_agg(c.relname, ',') FROM pg_publication_rel pr
+		JOIN pg_publication p ON p.oid = pr.prpubid
+		JOIN pg_class c ON c.oid = pr.prrelid
+		WHERE p.pubname = 'cdc'`).Scan(&members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if members != "events" {
+		t.Errorf("publication members = %q, want events", members)
+	}
+}
+

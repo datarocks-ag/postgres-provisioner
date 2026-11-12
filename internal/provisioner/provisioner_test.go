@@ -3349,7 +3349,7 @@ func TestCheckPreloadLibrariesSkippedWhenShowFails(t *testing.T) {
 
 const (
 	publicationQuery       = `SELECT puballtables, pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = \$1`
-	publicationTablesQuery = `SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = \$1`
+	publicationTablesQuery = `SELECT n\.nspname, c\.relname\s+FROM pg_publication_rel pr`
 )
 
 func expectPublicationMissing(mock sqlmock.Sqlmock, name string) {
@@ -3364,7 +3364,7 @@ func expectPublication(mock sqlmock.Sqlmock, name string, allTables bool, ops [4
 	if allTables {
 		return
 	}
-	rows := sqlmock.NewRows([]string{"schemaname", "tablename"})
+	rows := sqlmock.NewRows([]string{"nspname", "relname"})
 	for _, t := range tables {
 		rows.AddRow(t[0], t[1])
 	}
