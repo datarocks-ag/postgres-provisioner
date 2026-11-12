@@ -1791,3 +1791,38 @@ func TestRunCreateStrategySkipsMembershipsForExistingRole(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRunCreateStrategyGrantsMembershipsForNewRole(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	cfg := &config.Config{
+		Strategy: "create",
+		Roles: []config.Role{
+			{Name: "exporter", MemberOf: []string{"pg_monitor"}},
+		},
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
+		WithArgs("exporter").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`CREATE ROLE "exporter"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(membershipQuery).
+		WithArgs("exporter", "pg_monitor").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`GRANT "pg_monitor" TO "exporter"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := New(mockDB, db.ConnConfig{}, cfg, DefaultOptions())
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
