@@ -25,13 +25,24 @@ type Extension struct {
 	Cascade bool `yaml:"cascade"`
 }
 
+// extensionFields are the keys allowed in the mapping form of an extension.
+var extensionFields = map[string]bool{"name": true, "schema": true, "version": true, "cascade": true}
+
 // UnmarshalYAML accepts the extension name as a plain string or a mapping with options.
+// Unknown keys in the mapping are rejected, so a typo like "shema" doesn't silently drop
+// the option (node.Decode has no KnownFields equivalent).
 func (e *Extension) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
 		e.Name = node.Value
 		return nil
 	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if !extensionFields[key.Value] {
+				return fmt.Errorf("line %d: unknown extension field %q (allowed: name, schema, version, cascade)", key.Line, key.Value)
+			}
+		}
 		type plain Extension // no UnmarshalYAML method, avoids recursion
 		return node.Decode((*plain)(e))
 	default:

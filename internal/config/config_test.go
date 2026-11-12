@@ -1482,6 +1482,20 @@ databases:
 	}
 }
 
+func TestExtensionRejectsUnknownField(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - name: pgcrypto
+        shema: crypto
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), `line 6: unknown extension field "shema"`) {
+		t.Fatalf("expected unknown field error with line, got: %v", err)
+	}
+}
+
 func TestExtensionScalarAndMappingForms(t *testing.T) {
 	t.Setenv("EXT_SCHEMA", "monitoring")
 	path := writeTempConfig(t, `
