@@ -979,6 +979,9 @@ roles:
   - name: "tables_only"
     password: "tablespass"
     options: { login: true }
+  - name: "migrator"
+    password: "migratorpass"
+    options: { login: true }
 
 databases:
   - name: "seqtest"
@@ -987,6 +990,7 @@ databases:
       - name: "data"
         owner: "owner"
     grants:
+      - { role: "migrator", privileges: ["USAGE", "CREATE"], on_schema: "data" }
       - { role: "app", privileges: ["USAGE"], on_schema: "data" }
       - { role: "app", privileges: ["SELECT", "INSERT"], on_tables_in_schema: "data" }
       - { role: "app", privileges: ["USAGE", "SELECT"], on_sequences_in_schema: "data" }
@@ -1024,23 +1028,44 @@ databases:
 		t.Errorf("identity column insert should not need a sequence grant: %v", err)
 	}
 
-	// A second run covers sequences that already exist (GRANT ... ON ALL SEQUENCES).
+	// A sequence created by a role that is neither the provisioning user nor the schema
+	// owner is not covered by default privileges, so only the next run's
+	// GRANT ... ON ALL SEQUENCES reaches it.
+	migratorDB := connectAs(t, connCfg, "migrator", "migratorpass", "seqtest")
+	if _, err := migratorDB.ExecContext(ctx,
+		`CREATE TABLE data.migrator_items (id serial PRIMARY KEY, name text)`,
+	); err != nil {
+		t.Fatalf("create table as migrator: %v", err)
+	}
+	appHasSequenceUsage := func() bool {
+		t.Helper()
+		var has bool
+		if err := ownerDB.QueryRowContext(ctx,
+			`SELECT has_sequence_privilege('app', 'data.migrator_items_id_seq', 'USAGE')`,
+		).Scan(&has); err != nil {
+			t.Fatal(err)
+		}
+		return has
+	}
+	if appHasSequenceUsage() {
+		t.Fatal("app unexpectedly has USAGE on a sequence created by migrator before the second run")
+	}
+
 	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
 		t.Fatalf("second provisioning run failed: %v", err)
 	}
-	var hasPrivilege bool
-	if err := ownerDB.QueryRowContext(ctx,
-		`SELECT has_sequence_privilege('app', 'data.serial_items_id_seq', 'USAGE')`,
-	).Scan(&hasPrivilege); err != nil {
-		t.Fatal(err)
+	if !appHasSequenceUsage() {
+		t.Error("expected app to have USAGE on data.migrator_items_id_seq after the second run")
 	}
-	if !hasPrivilege {
-		t.Error("expected app to have USAGE on data.serial_items_id_seq")
+	if _, err := appDB.ExecContext(ctx, `INSERT INTO data.migrator_items (name) VALUES ('ok')`); err != nil {
+		t.Errorf("app insert into migrator-created serial table after second run: %v", err)
 	}
 }
 
-// TestIntegrationFunctionGrants verifies on_functions_in_schema for a function created
-// by a migration that revokes the default EXECUTE from PUBLIC.
+// TestIntegrationFunctionGrants verifies on_functions_in_schema for functions whose
+// default EXECUTE was revoked from PUBLIC: an existing function is reached by
+// GRANT ... ON ALL ROUTINES, and a function the schema owner creates later is reached
+// by ALTER DEFAULT PRIVILEGES FOR ROLE <owner>.
 func TestIntegrationFunctionGrants(t *testing.T) {
 	adminDB, connCfg, cleanup := setupPostgres(t)
 	defer cleanup()
@@ -1051,8 +1076,13 @@ CREATE FUNCTION api.answer() RETURNS int LANGUAGE sql AS 'SELECT 42';
 REVOKE EXECUTE ON FUNCTION api.answer() FROM PUBLIC;
 `)
 
-	cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+	loadConfig := func(extraGrants string) *config.Config {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
 roles:
+  - name: "fnowner"
+    password: "fnownerpass"
+    options: { login: true }
   - name: "caller"
     password: "callerpass"
     options: { login: true }
@@ -1062,35 +1092,66 @@ roles:
 
 databases:
   - name: "fntest"
+    owner: "fnowner"
     schemas:
       - name: "api"
+        owner: "fnowner"
     grants:
       - { role: "caller", privileges: ["USAGE"], on_schema: "api" }
-      - { role: "caller", privileges: ["EXECUTE"], on_functions_in_schema: "api" }
       - { role: "stranger", privileges: ["USAGE"], on_schema: "api" }
+%s
     migrations:
       directory: %q
-`, migrationsDir)))
-	if err != nil {
-		t.Fatal(err)
+`, extraGrants, migrationsDir)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
 	}
 
+	// First run without the function grant: the migration creates api.answer() and no
+	// default privileges for functions exist yet.
 	ctx := context.Background()
-	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
-		t.Fatalf("provisioning run failed: %v", err)
+	if err := provisioner.New(adminDB, connCfg, loadConfig(""), provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("first provisioning run failed: %v", err)
 	}
 
 	callerDB := connectAs(t, connCfg, "caller", "callerpass", "fntest")
 	var answer int
+	if err := callerDB.QueryRowContext(ctx, `SELECT api.answer()`).Scan(&answer); err == nil {
+		t.Fatal("expected caller to be denied EXECUTE on api.answer() before the function grant")
+	}
+
+	// Second run adds the grant; api.answer() already exists, so only
+	// GRANT ... ON ALL ROUTINES can reach it.
+	cfg := loadConfig(`      - { role: "caller", privileges: ["EXECUTE"], on_functions_in_schema: "api" }`)
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("second provisioning run failed: %v", err)
+	}
 	if err := callerDB.QueryRowContext(ctx, `SELECT api.answer()`).Scan(&answer); err != nil {
-		t.Fatalf("caller should be able to execute api.answer(): %v", err)
+		t.Fatalf("caller should be able to execute existing api.answer(): %v", err)
 	}
 	if answer != 42 {
 		t.Errorf("expected 42, got %d", answer)
 	}
 
+	// A function the schema owner creates after provisioning is covered by
+	// ALTER DEFAULT PRIVILEGES FOR ROLE fnowner, even with PUBLIC's EXECUTE revoked.
+	ownerDB := connectAs(t, connCfg, "fnowner", "fnownerpass", "fntest")
+	if _, err := ownerDB.ExecContext(ctx, `
+		CREATE FUNCTION api.owned() RETURNS int LANGUAGE sql AS 'SELECT 7';
+		REVOKE EXECUTE ON FUNCTION api.owned() FROM PUBLIC;
+	`); err != nil {
+		t.Fatalf("create function as schema owner: %v", err)
+	}
+	if err := callerDB.QueryRowContext(ctx, `SELECT api.owned()`).Scan(&answer); err != nil {
+		t.Errorf("caller should be able to execute owner-created api.owned(): %v", err)
+	}
+
 	strangerDB := connectAs(t, connCfg, "stranger", "strangerpass", "fntest")
-	if err := strangerDB.QueryRowContext(ctx, `SELECT api.answer()`).Scan(&answer); err == nil {
-		t.Error("expected stranger to be denied EXECUTE on api.answer()")
+	for _, fn := range []string{"api.answer()", "api.owned()"} {
+		if err := strangerDB.QueryRowContext(ctx, "SELECT "+fn).Scan(&answer); err == nil {
+			t.Errorf("expected stranger to be denied EXECUTE on %s", fn)
+		}
 	}
 }
