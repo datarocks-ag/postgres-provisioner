@@ -2123,3 +2123,30 @@ func TestRevokeWarnsWhenPrivilegeSurvives(t *testing.T) {
 		t.Errorf("expected warning to list only CONNECT, got logs:\n%s", out)
 	}
 }
+
+func TestRevokeDependentPrivilegesErrorHasHint(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(roleOIDQuery).WithArgs("app").
+		WillReturnRows(sqlmock.NewRows([]string{"oid"}).AddRow(int64(16384)))
+	mock.ExpectQuery(databaseACLQuery).WithArgs("myapp", int64(16384)).
+		WillReturnRows(privilegeRows("CONNECT"))
+	pqErr := &pq.Error{Code: "2BP01", Message: "dependent privileges exist"}
+	mock.ExpectExec(`^REVOKE CONNECT ON DATABASE "myapp" FROM "app"$`).WillReturnError(pqErr)
+
+	p := &Provisioner{}
+	revoke := config.Grant{Role: "app", Privileges: []string{"CONNECT"}, OnDatabase: true}
+	err = p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke)
+	if !errors.Is(err, pqErr) {
+		t.Fatalf("expected wrapped pq.Error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "WITH GRANT OPTION") || !strings.Contains(err.Error(), "CASCADE") {
+		t.Errorf("expected hint about grant option and CASCADE, got %v", err)
+	}
+}

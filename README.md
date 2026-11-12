@@ -269,6 +269,10 @@ databases:
   are duplicate revokes.
 - `REVOKE` only removes privileges granted by the provisioning user (or the object owner).
   If a privilege survives because another role granted it, a warning is logged.
+- Revokes never use `CASCADE`. If the grantee holds a privilege `WITH GRANT OPTION` and has
+  granted it on to other roles, PostgreSQL rejects the `REVOKE` with "dependent privileges
+  exist" and the run fails with a hint. Revoke the dependent grants first (or run
+  `REVOKE ... CASCADE` manually if removing them is intended).
 - With `strategy: create`, revokes (like other per-database resources) only apply to newly
   created databases. Use `strategy: update` to harden an existing database.
 

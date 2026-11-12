@@ -8,8 +8,14 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/lib/pq"
+
 	"postgres-provisioner/internal/config"
 )
+
+// pgDependentObjectsStillExist is the SQLSTATE of "dependent privileges exist", returned
+// when REVOKE without CASCADE would orphan grants the grantee made WITH GRANT OPTION.
+const pgDependentObjectsStillExist = "2BP01"
 
 // aclQueries reads an object's existence and the privileges a grantee holds on it.
 // COALESCE with acldefault() makes the implicit defaults visible (e.g. a new database
@@ -79,7 +85,7 @@ func (p *Provisioner) applyRevoke(ctx context.Context, dbConn *sql.DB, database 
 	slog.Info("Revoking privileges", "role", revoke.Role, "on", strings.ToLower(objectSQL), "privileges", privs)
 	query := fmt.Sprintf("REVOKE %s ON %s FROM %s", privs, objectSQL, granteeSQL(revoke.Role))
 	if _, err := p.execMutation(ctx, dbConn, query); err != nil {
-		return err
+		return explainRevokeError(err)
 	}
 	if p.opts.DryRun {
 		return nil
@@ -96,6 +102,17 @@ func (p *Provisioner) applyRevoke(ctx context.Context, dbConn *sql.DB, database 
 			"role", revoke.Role, "on", strings.ToLower(objectSQL), "privileges", strings.Join(remaining, ", "))
 	}
 	return nil
+}
+
+// explainRevokeError adds a hint to "dependent privileges exist". The provisioner never
+// revokes with CASCADE, because that silently removes grants other roles depend on.
+func explainRevokeError(err error) error {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == pgDependentObjectsStillExist {
+		return fmt.Errorf("%w (the grantee holds the privilege WITH GRANT OPTION and granted it to other roles; "+
+			"revoke those grants first, or run REVOKE ... CASCADE manually: the provisioner never cascades)", err)
+	}
+	return err
 }
 
 // heldPrivileges returns the privileges role directly holds on the object (PUBLIC means

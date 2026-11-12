@@ -1356,3 +1356,57 @@ databases:
 		t.Error("expected outsider to keep CONNECT through delegate's grant to PUBLIC")
 	}
 }
+
+// TestIntegrationRevokeFailsOnDependentPrivileges revokes CONNECT from a role that
+// re-granted it WITH GRANT OPTION. The provisioner doesn't cascade, so REVOKE fails; the
+// error must explain why and the privileges must stay untouched.
+func TestIntegrationRevokeFailsOnDependentPrivileges(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE ROLE delegate`,
+		`CREATE ROLE downstream`,
+		`CREATE DATABASE dependent`,
+		`GRANT CONNECT ON DATABASE dependent TO delegate WITH GRANT OPTION`,
+		// One round trip, so SET ROLE applies to the GRANT on the same pooled connection.
+		`SET ROLE delegate; GRANT CONNECT ON DATABASE dependent TO downstream; RESET ROLE`,
+	} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "delegate"
+databases:
+  - name: "dependent"
+    revokes:
+      - { role: "delegate", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx)
+	if err == nil {
+		t.Fatal("expected REVOKE to fail on dependent privileges")
+	}
+	for _, want := range []string{"dependent privileges exist", "WITH GRANT OPTION", "CASCADE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected error to contain %q, got: %v", want, err)
+		}
+	}
+
+	var downstreamCanConnect bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT has_database_privilege('downstream', 'dependent', 'CONNECT')`,
+	).Scan(&downstreamCanConnect); err != nil {
+		t.Fatal(err)
+	}
+	if !downstreamCanConnect {
+		t.Error("expected downstream to keep CONNECT: the provisioner must not cascade")
+	}
+}
