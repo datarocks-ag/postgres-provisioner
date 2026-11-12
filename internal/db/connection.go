@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +24,42 @@ type ConnConfig struct {
 	Port     string
 	DBName   string
 	SSLMode  string
+	// SessionParams are run-time parameters set for every session at connection
+	// startup (the libpq "options" parameter, i.e. "-c name=value"). Startup
+	// parameters take precedence over role and database defaults (ALTER ROLE/
+	// DATABASE ... SET), so they shield the session from those.
+	SessionParams map[string]string
+}
+
+// SafeSessionParams returns session parameters that keep role and database
+// defaults from breaking the provisioner's own work: a read-only default would
+// make CREATE SCHEMA or migrations fail, and short timeouts would abort long
+// migrations or the provisioner's statements. search_path is deliberately not
+// overridden, so unqualified names in migrations resolve as for the database's users.
+func SafeSessionParams() map[string]string {
+	return map[string]string{
+		"statement_timeout":                   "0",
+		"lock_timeout":                        "0",
+		"idle_in_transaction_session_timeout": "0",
+		"default_transaction_read_only":       "off",
+	}
+}
+
+// sessionOptions renders params as the startup "options" value: sorted
+// "-c name=value" switches. The server splits options on whitespace, so spaces
+// and backslashes in values are backslash-escaped.
+func sessionOptions(params map[string]string) string {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	escaper := strings.NewReplacer(`\`, `\\`, " ", `\ `)
+	switches := make([]string, len(names))
+	for i, name := range names {
+		switches[i] = "-c " + escaper.Replace(name+"="+params[name])
+	}
+	return strings.Join(switches, " ")
 }
 
 // DSN returns the PostgreSQL connection string. User, password, and database
@@ -41,6 +78,9 @@ func (c ConnConfig) DSN() string {
 	u.RawPath = "/" + url.PathEscape(c.DBName)
 	q := url.Values{}
 	q.Set("sslmode", c.SSLMode)
+	if len(c.SessionParams) > 0 {
+		q.Set("options", sessionOptions(c.SessionParams))
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }

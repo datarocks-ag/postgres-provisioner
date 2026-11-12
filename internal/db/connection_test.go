@@ -57,6 +57,56 @@ func TestDSNDatabaseNameWithSlash(t *testing.T) {
 	}
 }
 
+func TestDSNSessionParams(t *testing.T) {
+	cfg := ConnConfig{
+		User:     "user",
+		Password: "p@ss:word",
+		Host:     "localhost",
+		Port:     "5432",
+		DBName:   "mydb",
+		SSLMode:  "disable",
+		SessionParams: map[string]string{
+			"statement_timeout": "0",
+			"lock_timeout":      "0",
+		},
+	}
+
+	got := cfg.DSN()
+	want := "postgresql://user:p%40ss%3Aword@localhost:5432/mydb?options=-c+lock_timeout%3D0+-c+statement_timeout%3D0&sslmode=disable"
+	if got != want {
+		t.Errorf("DSN() = %q, want %q", got, want)
+	}
+}
+
+func TestSessionOptionsEscapesWhitespaceAndBackslash(t *testing.T) {
+	got := sessionOptions(map[string]string{"application_name": `my app\x`})
+	want := `-c application_name=my\ app\\x`
+	if got != want {
+		t.Errorf("sessionOptions() = %q, want %q", got, want)
+	}
+}
+
+func TestSafeSessionParams(t *testing.T) {
+	params := SafeSessionParams()
+	want := map[string]string{
+		"statement_timeout":                   "0",
+		"lock_timeout":                        "0",
+		"idle_in_transaction_session_timeout": "0",
+		"default_transaction_read_only":       "off",
+	}
+	if len(params) != len(want) {
+		t.Fatalf("SafeSessionParams() = %v, want %v", params, want)
+	}
+	for name, value := range want {
+		if params[name] != value {
+			t.Errorf("SafeSessionParams()[%q] = %q, want %q", name, params[name], value)
+		}
+	}
+	if _, ok := params["search_path"]; ok {
+		t.Error("search_path must not be overridden")
+	}
+}
+
 func TestRedactConnError(t *testing.T) {
 	const password = "p@ss:word"
 
