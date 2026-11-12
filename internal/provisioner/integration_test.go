@@ -2400,3 +2400,84 @@ databases:
 		t.Errorf("cdc tables = %q, want app.customers,app.orders", got)
 	}
 }
+
+// TestIntegrationPublicationDrift verifies that a changed publish list is applied to an
+// existing publication, and that an all_tables mismatch only warns: the publication keeps
+// its definition and no tables are added or reported as extra.
+func TestIntegrationPublicationDrift(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t, "-c", "wal_level=logical")
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__tables.sql", `CREATE TABLE app.orders (id int PRIMARY KEY);`)
+	configYAML := func(cdcPublish, everything, listed string) string {
+		return fmt.Sprintf(`
+databases:
+  - name: "driftdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: ["app.orders"]
+        publish: %s
+      - name: "everything"
+        %s
+      - name: "listed"
+        %s
+`, migrationsDir, cdcPublish, everything, listed)
+	}
+
+	logs, err := runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(),
+		configYAML(`["insert", "update", "delete", "truncate"]`, "all_tables: true", `tables: ["app.orders"]`))
+	if err != nil {
+		t.Fatalf("first run failed: %v\nlogs:\n%s", err, logs)
+	}
+
+	// Second run: narrower publish list for cdc; all_tables flipped for the other two.
+	logs, err = runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(),
+		configYAML(`["insert"]`, `tables: ["app.orders"]`, "all_tables: true"))
+	if err != nil {
+		t.Fatalf("second run failed: %v\nlogs:\n%s", err, logs)
+	}
+	if !strings.Contains(logs, "Updating publication operations") {
+		t.Errorf("expected publish update, logs:\n%s", logs)
+	}
+	for _, name := range []string{"everything", "listed"} {
+		warned := false
+		for _, line := range strings.Split(logs, "\n") {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, "all_tables differs from config") &&
+				strings.Contains(line, "publication="+name+" ") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Errorf("expected all_tables warning for %s, logs:\n%s", name, logs)
+		}
+	}
+	if strings.Contains(logs, "Adding tables") || strings.Contains(logs, "not in config") {
+		t.Errorf("all_tables mismatch must not reconcile tables, logs:\n%s", logs)
+	}
+
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "driftdb")
+	ctx := context.Background()
+	var insert, update, del, truncate bool
+	if err := conn.QueryRowContext(ctx,
+		`SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = 'cdc'`,
+	).Scan(&insert, &update, &del, &truncate); err != nil {
+		t.Fatal(err)
+	}
+	if !insert || update || del || truncate {
+		t.Errorf("cdc publish = insert:%v update:%v delete:%v truncate:%v, want insert only", insert, update, del, truncate)
+	}
+	var everythingAll, listedAll bool
+	if err := conn.QueryRowContext(ctx, `SELECT
+		(SELECT puballtables FROM pg_publication WHERE pubname = 'everything'),
+		(SELECT puballtables FROM pg_publication WHERE pubname = 'listed')`).Scan(&everythingAll, &listedAll); err != nil {
+		t.Fatal(err)
+	}
+	if !everythingAll || listedAll {
+		t.Errorf("puballtables changed: everything=%v listed=%v, want true/false", everythingAll, listedAll)
+	}
+}

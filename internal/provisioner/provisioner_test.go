@@ -3479,6 +3479,49 @@ func TestEnsurePublicationPublishDrift(t *testing.T) {
 	}
 }
 
+// TestEnsurePublicationAllTablesMismatchWarns: all_tables can't be altered, so a mismatch in
+// either direction only warns; tables are not reconciled, while publish drift still is.
+func TestEnsurePublicationAllTablesMismatchWarns(t *testing.T) {
+	tests := []struct {
+		name      string
+		installed bool
+		pub       config.Publication
+	}{
+		{"installed all tables, configured list", true,
+			config.Publication{Name: "cdc", Tables: []string{"app.orders"}, Publish: []string{"insert"}}},
+		{"installed list, configured all tables", false,
+			config.Publication{Name: "cdc", AllTables: true, Publish: []string{"insert"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+
+			expectPublication(mock, "cdc", tt.installed, allOps, [2]string{"app", "legacy"})
+			// No to_regclass / relkind lookups and no ADD TABLE: tables aren't reconciled.
+			mock.ExpectExec(`^ALTER PUBLICATION "cdc" SET \(publish = 'insert'\)$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+			logs := captureLogs(t)
+			p := &Provisioner{opts: DefaultOptions()}
+			if err := p.ensurePublication(context.Background(), mockDB, tt.pub, "update", migrationsRan); err != nil {
+				t.Fatalf("ensurePublication: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), "level=WARN msg=\"Publication all_tables differs from config") {
+				t.Errorf("expected all_tables warning, logs:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), "not in config") || strings.Contains(logs.String(), "tables up to date") {
+				t.Errorf("tables must not be reconciled, logs:\n%s", logs.String())
+			}
+		})
+	}
+}
+
 func TestEnsurePublicationUpToDateIsNoOp(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
 	if err != nil {
