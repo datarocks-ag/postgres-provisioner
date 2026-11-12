@@ -216,7 +216,7 @@ type Database struct {
 	// Settings are database-wide run-time parameter defaults (ALTER DATABASE ... SET).
 	Settings Settings `yaml:"settings"`
 	// RoleSettings are per-role defaults within this database (ALTER ROLE ... IN DATABASE ... SET),
-	// keyed by role name.
+	// keyed by role name. They follow this database's strategy, not the role's.
 	RoleSettings map[string]Settings `yaml:"role_settings"`
 	Strategy     string              `yaml:"strategy"`
 }
