@@ -2944,16 +2944,23 @@ func TestDryRunPreviewsSettingsForDatabaseToBeCreated(t *testing.T) {
 	}
 }
 
-const extensionLookupQuery = `SELECT e.extversion, n.nspname\s+FROM pg_extension e`
+const extensionLookupQuery = `SELECT e.extversion, n.nspname, e.extrelocatable\s+FROM pg_extension e`
+
+var extensionLookupColumns = []string{"extversion", "nspname", "extrelocatable"}
 
 func expectExtensionMissing(mock sqlmock.Sqlmock, name string) {
 	mock.ExpectQuery(extensionLookupQuery).WithArgs(name).
-		WillReturnRows(sqlmock.NewRows([]string{"extversion", "nspname"}))
+		WillReturnRows(sqlmock.NewRows(extensionLookupColumns))
 }
 
+// expectExtensionInstalled expects the lookup of a relocatable installed extension.
 func expectExtensionInstalled(mock sqlmock.Sqlmock, name, version, schema string) {
+	expectExtensionInstalledRelocatable(mock, name, version, schema, true)
+}
+
+func expectExtensionInstalledRelocatable(mock sqlmock.Sqlmock, name, version, schema string, relocatable bool) {
 	mock.ExpectQuery(extensionLookupQuery).WithArgs(name).
-		WillReturnRows(sqlmock.NewRows([]string{"extversion", "nspname"}).AddRow(version, schema))
+		WillReturnRows(sqlmock.NewRows(extensionLookupColumns).AddRow(version, schema, relocatable))
 }
 
 func TestEnsureExtensionWithSchemaVersionCascade(t *testing.T) {
@@ -3095,6 +3102,34 @@ func TestEnsureExtensionSchemaDriftWarnsOnly(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "installed_schema=public") {
 		t.Errorf("expected schema drift warning, got logs:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `SET SCHEMA \"crypto\"`) {
+		t.Errorf("expected SET SCHEMA hint for a relocatable extension, got logs:\n%s", logs.String())
+	}
+}
+
+// A non-relocatable extension (e.g. plpgsql, or one with a fixed schema) can't be moved
+// with SET SCHEMA: the hint must say to drop and recreate it instead.
+func TestEnsureExtensionSchemaDriftNonRelocatableHint(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectExtensionInstalledRelocatable(mock, "plpgsql", "1.0", "pg_catalog", false)
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "plpgsql", Schema: "app"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), "SET SCHEMA") || !strings.Contains(logs.String(), "not relocatable") {
+		t.Errorf("expected drop-and-recreate hint without SET SCHEMA, got logs:\n%s", logs.String())
 	}
 }
 

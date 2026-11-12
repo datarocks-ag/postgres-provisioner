@@ -194,7 +194,15 @@ databases:
   version it doesn't ship, per `pg_extension_update_paths`), a warning is logged and the
   installed version is kept.
 - An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
-  breaks references to its objects — a warning with the command to run is logged instead.
+  breaks references to its objects — a warning is logged instead. Its hint suggests `SET SCHEMA`
+  only for relocatable extensions (`pg_extension.extrelocatable`); any other extension must be
+  dropped and recreated (`DROP EXTENSION ... CASCADE` also drops objects depending on it).
+- `cascade: true` installs missing dependencies at their default versions, into the configured
+  `schema` of the dependent extension. Without one, each goes to its default schema, as a
+  schema-less `CREATE EXTENSION` would; a dependency whose control file fixes its schema always
+  goes there. To give a dependency its own `schema` or `version`, list it separately **before**
+  the dependent extension; if it is listed after, it is already installed by then, so a differing
+  `version` is updated as above and a differing `schema` only produces the warning.
 - **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` need their library in the
   server's `shared_preload_libraries` (which needs a restart). Before touching a database, the
   provisioner reads the setting once per run (`$libdir/` prefixes and `.so`/`.dylib` suffixes are

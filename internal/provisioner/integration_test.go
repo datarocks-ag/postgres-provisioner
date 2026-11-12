@@ -2112,3 +2112,32 @@ databases:
 		t.Errorf("expected no schema or extension to be created before the preload error")
 	}
 }
+
+// TestIntegrationExtensionSchemaDriftHint verifies that schema drift on a non-relocatable
+// extension (plpgsql, installed in pg_catalog) warns without suggesting SET SCHEMA.
+func TestIntegrationExtensionSchemaDriftHint(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "driftdb"
+    extensions:
+      - { name: plpgsql, schema: public }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background()); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+	if !strings.Contains(logs.String(), "not relocatable") || strings.Contains(logs.String(), "SET SCHEMA") {
+		t.Errorf("expected drop-and-recreate hint, logs:\n%s", logs.String())
+	}
+}

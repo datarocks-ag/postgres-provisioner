@@ -18,11 +18,12 @@ import (
 // provisioner leaves moving it to an operator.
 func (p *Provisioner) ensureExtension(ctx context.Context, dbConn *sql.DB, ext config.Extension, strategy string) error {
 	var installedVersion, installedSchema string
+	var relocatable bool
 	err := dbConn.QueryRowContext(ctx,
-		`SELECT e.extversion, n.nspname
+		`SELECT e.extversion, n.nspname, e.extrelocatable
 		FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
 		WHERE e.extname = $1`, ext.Name,
-	).Scan(&installedVersion, &installedSchema)
+	).Scan(&installedVersion, &installedSchema, &relocatable)
 	if errors.Is(err, sql.ErrNoRows) {
 		slog.Info("Creating extension", "extension", ext.Name, "schema", ext.Schema, "version", ext.Version)
 		_, err := p.execMutation(ctx, dbConn, createExtensionSQL(ext))
@@ -35,7 +36,7 @@ func (p *Provisioner) ensureExtension(ctx context.Context, dbConn *sql.DB, ext c
 	if ext.Schema != "" && ext.Schema != installedSchema {
 		slog.Warn("Extension is installed in a different schema; not moving it automatically",
 			"extension", ext.Name, "installed_schema", installedSchema, "configured_schema", ext.Schema,
-			"hint", fmt.Sprintf("ALTER EXTENSION %s SET SCHEMA %s", quoteIdentifier(ext.Name), quoteIdentifier(ext.Schema)))
+			"hint", schemaDriftHint(ext, relocatable))
 	}
 
 	if ext.Version == "" || ext.Version == installedVersion {
@@ -70,6 +71,17 @@ func (p *Provisioner) ensureExtension(ctx context.Context, dbConn *sql.DB, ext c
 	query := fmt.Sprintf("ALTER EXTENSION %s UPDATE TO %s", quoteIdentifier(ext.Name), quoteLiteral(ext.Version))
 	_, err = p.execMutation(ctx, dbConn, query)
 	return err
+}
+
+// schemaDriftHint tells the operator how to move an installed extension to the configured
+// schema. ALTER EXTENSION ... SET SCHEMA only works for relocatable extensions; the others
+// must be dropped and recreated, which also drops objects that depend on them.
+func schemaDriftHint(ext config.Extension, relocatable bool) string {
+	if relocatable {
+		return fmt.Sprintf("ALTER EXTENSION %s SET SCHEMA %s", quoteIdentifier(ext.Name), quoteIdentifier(ext.Schema))
+	}
+	return fmt.Sprintf("extension is not relocatable: DROP EXTENSION %s and let the provisioner recreate it in %s "+
+		"(DROP ... CASCADE also drops dependent objects)", quoteIdentifier(ext.Name), quoteIdentifier(ext.Schema))
 }
 
 func createExtensionSQL(ext config.Extension) string {
