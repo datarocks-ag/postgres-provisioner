@@ -13,9 +13,6 @@ import (
 // pointing a variable at a large or endless file (e.g. /dev/zero) by mistake.
 const maxSecretFileSize = 64 * 1024
 
-// envVarPattern matches ${...} references; the body is parsed by expander.expand.
-var envVarPattern = regexp.MustCompile(`\$\{([^}]*)}`)
-
 // envVarNamePattern is the set of names accepted inside ${...}.
 var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -73,39 +70,69 @@ type expander struct {
 // expand replaces ${VAR} and ${VAR:-default} references in s. path identifies the
 // config field in error messages.
 func (e *expander) expand(path, s string) string {
-	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
-		body := match[2 : len(match)-1]
-		name, defaultVal, hasDefault := strings.Cut(body, ":-")
-		if !envVarNamePattern.MatchString(name) {
-			e.errs = append(e.errs, fmt.Errorf("%s: invalid environment variable reference %q", path, match))
-			return match
-		}
-
-		val, ok, err := LookupEnvOrFile(name)
-		if err != nil {
-			e.errs = append(e.errs, fmt.Errorf("%s: %w", path, err))
-			return match
-		}
-		if ok {
-			return val
-		}
-		if hasDefault {
-			return defaultVal
-		}
-		e.errs = append(e.errs, fmt.Errorf("%s: environment variable %s is not set (set %s or %s_FILE)", path, name, name, name))
-		return match
-	})
+	out, _ := e.expandReferences(path, s)
+	return out
 }
 
 // expandSecret expands a secret field and additionally rejects references that resolve
 // to an empty string: an empty password means "no password", which would otherwise
 // hide a missing secret behind a successful run.
 func (e *expander) expandSecret(path, s string) string {
-	expanded := e.expand(path, s)
-	if expanded == "" && envVarPattern.MatchString(s) {
+	expanded, hasReference := e.expandReferences(path, s)
+	if expanded == "" && hasReference {
 		e.errs = append(e.errs, fmt.Errorf("%s: environment variable reference resolved to an empty value", path))
 	}
 	return expanded
+}
+
+// expandReferences scans s left to right, resolving each ${...} reference, and reports
+// whether s contained any reference. A reference ends at the first '}'; an
+// unterminated "${" is kept as literal text.
+func (e *expander) expandReferences(path, s string) (string, bool) {
+	var out strings.Builder
+	hasReference := false
+	for {
+		start := strings.Index(s, "${")
+		if start < 0 {
+			break
+		}
+		length := strings.IndexByte(s[start+2:], '}')
+		if length < 0 {
+			break
+		}
+		end := start + 2 + length // index of the closing '}'
+		out.WriteString(s[:start])
+		out.WriteString(e.resolve(path, s[start:end+1]))
+		hasReference = true
+		s = s[end+1:]
+	}
+	out.WriteString(s)
+	return out.String(), hasReference
+}
+
+// resolve returns the value for a single ${...} reference, recording an error and
+// returning the reference unchanged when it cannot be resolved.
+func (e *expander) resolve(path, reference string) string {
+	body := reference[2 : len(reference)-1]
+	name, defaultVal, hasDefault := strings.Cut(body, ":-")
+	if !envVarNamePattern.MatchString(name) {
+		e.errs = append(e.errs, fmt.Errorf("%s: invalid environment variable reference %q", path, reference))
+		return reference
+	}
+
+	val, ok, err := LookupEnvOrFile(name)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s: %w", path, err))
+		return reference
+	}
+	if ok {
+		return val
+	}
+	if hasDefault {
+		return defaultVal
+	}
+	e.errs = append(e.errs, fmt.Errorf("%s: environment variable %s is not set (set %s or %s_FILE)", path, name, name, name))
+	return reference
 }
 
 func (e *expander) err() error {
