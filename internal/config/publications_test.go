@@ -60,3 +60,16 @@ databases:
 		})
 	}
 }
+
+func TestLoadReportsUnresolvedPublicationReference(t *testing.T) {
+	_, err := Load(writeTempConfig(t, `
+databases:
+  - name: "db1"
+    publications:
+      - name: "cdc"
+        tables: ["app.${PUB_TABLE_UNSET}"]
+`))
+	if err == nil || !strings.Contains(err.Error(), "databases[0].publications[0].tables[0]: environment variable PUB_TABLE_UNSET is not set") {
+		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}
