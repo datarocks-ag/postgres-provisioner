@@ -1545,3 +1545,16 @@ databases:
 		})
 	}
 }
+
+func TestLoadReportsUnresolvedExtensionReference(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - { name: pgcrypto, schema: "${EXT_SCHEMA_UNSET}" }
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "databases[0].extensions[0].schema: environment variable EXT_SCHEMA_UNSET is not set") {
+		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}
