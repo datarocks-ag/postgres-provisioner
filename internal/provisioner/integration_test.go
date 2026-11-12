@@ -3,12 +3,14 @@
 package provisioner_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1266,5 +1268,91 @@ databases:
 	run()
 	if canCreate() {
 		t.Error("expected CREATE on schema public to be revoked from PUBLIC")
+	}
+}
+
+// captureLogs redirects the default slog logger to a buffer until the test ends.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	return &buf
+}
+
+// TestIntegrationRevokeWarnsOnOtherGrantor revokes CONNECT from PUBLIC when a non-owner
+// role also granted it to PUBLIC. REVOKE (run as superuser, i.e. as the owner) only
+// removes the owner's grant, so the privilege survives and a warning must be logged.
+func TestIntegrationRevokeWarnsOnOtherGrantor(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE ROLE delegate`,
+		`CREATE ROLE outsider LOGIN`,
+		`CREATE DATABASE othergrantor`,
+		`GRANT CONNECT ON DATABASE othergrantor TO delegate WITH GRANT OPTION`,
+		// One round trip, so SET ROLE applies to the GRANT on the same pooled connection.
+		`SET ROLE delegate; GRANT CONNECT ON DATABASE othergrantor TO PUBLIC; RESET ROLE`,
+	} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "othergrantor"
+    revokes:
+      - { role: "PUBLIC", privileges: ["CONNECT"], on_database: true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "different grantor") {
+		t.Errorf("expected different-grantor warning, got logs:\n%s", out)
+	}
+
+	var grantors []string
+	rows, err := adminDB.QueryContext(ctx, `SELECT g.rolname
+		FROM pg_database d
+		CROSS JOIN LATERAL aclexplode(d.datacl) a
+		JOIN pg_roles g ON g.oid = a.grantor
+		WHERE d.datname = 'othergrantor' AND a.grantee = 0 AND a.privilege_type = 'CONNECT'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var grantor string
+		if err := rows.Scan(&grantor); err != nil {
+			t.Fatal(err)
+		}
+		grantors = append(grantors, grantor)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(grantors, ",") != "delegate" {
+		t.Errorf("expected only delegate's CONNECT grant to PUBLIC to remain, got grantors %v", grantors)
+	}
+
+	var outsiderCanConnect bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT has_database_privilege('outsider', 'othergrantor', 'CONNECT')`,
+	).Scan(&outsiderCanConnect); err != nil {
+		t.Fatal(err)
+	}
+	if !outsiderCanConnect {
+		t.Error("expected outsider to keep CONNECT through delegate's grant to PUBLIC")
 	}
 }

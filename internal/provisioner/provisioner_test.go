@@ -1,6 +1,7 @@
 package provisioner
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -2070,5 +2071,55 @@ func TestDryRunRevokeDoesNotExecute(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// captureLogs redirects the default slog logger to a buffer until the test ends.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	return &buf
+}
+
+// TestRevokeWarnsWhenPrivilegeSurvives covers a privilege that another grantor gave to the
+// grantee: REVOKE succeeds but leaves it in place, which must be surfaced as a warning.
+func TestRevokeWarnsWhenPrivilegeSurvives(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(databaseACLQuery).WithArgs("myapp", int64(0)).
+		WillReturnRows(privilegeRows("CONNECT", "TEMPORARY"))
+	mock.ExpectExec(`^REVOKE CONNECT, TEMPORARY ON DATABASE "myapp" FROM PUBLIC$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Post-check: CONNECT is still held through another grantor.
+	mock.ExpectQuery(databaseExistsQuery).WithArgs("myapp").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery(databaseACLQuery).WithArgs("myapp", int64(0)).
+		WillReturnRows(privilegeRows("CONNECT"))
+
+	logs := captureLogs(t)
+	p := &Provisioner{}
+	revoke := config.Grant{Role: "PUBLIC", Privileges: []string{"CONNECT", "TEMPORARY"}, OnDatabase: true}
+	if err := p.applyRevoke(context.Background(), mockDB, config.Database{Name: "myapp"}, revoke); err != nil {
+		t.Fatalf("applyRevoke: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "different grantor") {
+		t.Fatalf("expected different-grantor warning, got logs:\n%s", out)
+	}
+	if !strings.Contains(out, "privileges=CONNECT\n") {
+		t.Errorf("expected warning to list only CONNECT, got logs:\n%s", out)
 	}
 }
