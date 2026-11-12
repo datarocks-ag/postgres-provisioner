@@ -32,6 +32,11 @@ roles:
     options:
       login: true
       superuser: false
+  - name: "postgres_exporter"
+    password: "${POSTGRES_EXPORTER_PASSWORD}"
+    member_of: ["pg_monitor"]          # role memberships (see below)
+    options:
+      login: true
 
 databases:
   - name: "myapp"
@@ -83,6 +88,8 @@ such as `pg_monitor`, `pg_read_all_stats`, or `pg_read_all_data`. Memberships ar
 applied after all roles exist, so ordering in the config doesn't matter. Existing
 memberships are skipped, and memberships not listed are never revoked (additive only).
 With `strategy: create`, memberships are only applied to newly created roles.
+Circular memberships among declared roles (e.g. `a` member of `b` and `b` member
+of `a`) are rejected at config validation.
 
 **Example: a read-only monitoring user for `postgres_exporter`** — replaces the
 admin/superuser account in the exporter's `DATA_SOURCE_NAME`:
@@ -102,6 +109,18 @@ sessions' queries, `pg_stat_replication`, `pg_stat_statements`, WAL/size functio
 but cannot read or modify table data. Databases grant `CONNECT` to `PUBLIC` by
 default; if you revoked it, add an `on_database` `CONNECT` grant for the exporter role
 on each database it should scrape.
+
+**PostgreSQL 16+ notes:**
+
+- The connecting admin user must hold `ADMIN OPTION` on each group role it grants
+  (e.g. `GRANT pg_monitor TO admin WITH ADMIN OPTION`) unless it is a superuser;
+  `CREATEROLE` alone no longer suffices.
+- A membership's `INHERIT` flag is fixed when it is granted, taken from the member
+  role's `inherit` attribute at that moment. A role created with `inherit: false`
+  gets a non-inheriting membership (it must `SET ROLE` to use the group's
+  privileges), and changing it to `inherit: true` later does **not** update the
+  existing membership — the provisioner sees it as already granted. Fix it manually
+  with `GRANT <group> TO <role> WITH INHERIT TRUE`, or revoke it and re-run.
 
 ## Environment Variables
 
