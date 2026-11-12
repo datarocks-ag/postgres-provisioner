@@ -154,7 +154,12 @@ databases:
 - Names are case-insensitive and validated (`[A-Za-z_][A-Za-z0-9_$]*`, optionally with a
   `prefix.` for custom parameters). Whether PostgreSQL accepts a parameter for a role or
   database (e.g. `shared_buffers` can't be set per role) is only checked when it's applied.
-- With `strategy: create`, settings are only applied to newly created roles/databases.
+- Use canonical parameter names as listed in `pg_settings`. Obsolete aliases such as
+  `sort_mem` are accepted by PostgreSQL but stored under the canonical name (`work_mem`),
+  so they never compare as up to date and are re-applied on every run.
+- With `strategy: create`, role `settings` are only applied to newly created roles.
+  Database `settings` and `role_settings` follow the database's strategy: they are only
+  applied when the database is newly created, regardless of the role's strategy.
 - Settings also apply to the provisioner's own sessions (it reconnects to each database as
   the admin user). To keep them from breaking schema creation or migrations, every
   provisioner connection starts with `statement_timeout=0`, `lock_timeout=0`,
@@ -188,8 +193,8 @@ Control whether existing resources are updated or skipped using the `strategy` f
 
 - `update` (default) — create resources if missing, update if they already exist
 - `create` — create resources if missing, skip if they already exist. For databases,
-  this also skips all sub-resources (extensions, schemas, grants) if the database
-  already exists.
+  this also skips all sub-resources (settings, `role_settings`, extensions, schemas,
+  grants) if the database already exists.
 
 Strategy can be set globally or per resource. Per-resource strategy overrides the global setting.
 
