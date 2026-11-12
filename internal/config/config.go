@@ -220,7 +220,7 @@ type Database struct {
 	RoleSettings map[string]Settings `yaml:"role_settings"`
 	// Publications are logical replication publications, provisioned after migrations.
 	Publications []Publication `yaml:"publications"`
-	Strategy     string              `yaml:"strategy"`
+	Strategy     string        `yaml:"strategy"`
 }
 
 // Config is the top-level YAML configuration.
