@@ -217,11 +217,12 @@ func TestEnsureExtension(t *testing.T) {
 	}
 	defer mockDB.Close()
 
+	expectExtensionMissing(mock, "uuid-ossp")
 	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{}
-	if err := p.ensureExtension(context.Background(), mockDB, "uuid-ossp"); err != nil {
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}, "update"); err != nil {
 		t.Fatalf("ensureExtension: %v", err)
 	}
 
@@ -796,7 +797,7 @@ func TestProvisionDatabaseResources(t *testing.T) {
 	database := config.Database{
 		Name:       "testdb",
 		Owner:      "appuser",
-		Extensions: []string{"uuid-ossp"},
+		Extensions: []config.Extension{{Name: "uuid-ossp"}},
 		Schemas: []config.Schema{
 			{Name: "app", Owner: "appuser"},
 		},
@@ -809,14 +810,15 @@ func TestProvisionDatabaseResources(t *testing.T) {
 		},
 	}
 
-	// Extension
-	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	// Schema
+	// Schema (before extensions, so extensions can be installed into it)
 	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "appuser"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// Extension
+	expectExtensionMissing(mock, "uuid-ossp")
+	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// Grant
@@ -866,9 +868,10 @@ func TestProvisionDatabaseResourcesExtensionError(t *testing.T) {
 
 	database := config.Database{
 		Name:       "testdb",
-		Extensions: []string{"bad_ext"},
+		Extensions: []config.Extension{{Name: "bad_ext"}},
 	}
 
+	expectExtensionMissing(mock, "bad_ext")
 	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "bad_ext"`).
 		WillReturnError(fmt.Errorf("extension not available"))
 
@@ -1527,10 +1530,11 @@ func TestDryRunSchemaAndExtension(t *testing.T) {
 	}
 	defer mockDB.Close()
 
-	// No Exec expectations — both must be skipped in dry-run mode.
+	// Only the read-only extension lookup runs; no Exec — both must be skipped in dry-run mode.
+	expectExtensionMissing(mock, "uuid-ossp")
 	p := &Provisioner{opts: dryRunOptions()}
 
-	if err := p.ensureExtension(context.Background(), mockDB, "uuid-ossp"); err != nil {
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "uuid-ossp"}, "update"); err != nil {
 		t.Fatalf("ensureExtension: %v", err)
 	}
 	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "update"); err != nil {
@@ -2937,5 +2941,408 @@ func TestDryRunPreviewsSettingsForDatabaseToBeCreated(t *testing.T) {
 		if !strings.HasPrefix(captured[i], want[i]) {
 			t.Errorf("captured[%d] = %q, want prefix %q", i, captured[i], want[i])
 		}
+	}
+}
+
+const extensionLookupQuery = `SELECT e.extversion, n.nspname, e.extrelocatable\s+FROM pg_extension e`
+
+var extensionLookupColumns = []string{"extversion", "nspname", "extrelocatable"}
+
+func expectExtensionMissing(mock sqlmock.Sqlmock, name string) {
+	mock.ExpectQuery(extensionLookupQuery).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows(extensionLookupColumns))
+}
+
+// expectExtensionInstalled expects the lookup of a relocatable installed extension.
+func expectExtensionInstalled(mock sqlmock.Sqlmock, name, version, schema string) {
+	expectExtensionInstalledRelocatable(mock, name, version, schema, true)
+}
+
+func expectExtensionInstalledRelocatable(mock sqlmock.Sqlmock, name, version, schema string, relocatable bool) {
+	mock.ExpectQuery(extensionLookupQuery).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows(extensionLookupColumns).AddRow(version, schema, relocatable))
+}
+
+func TestEnsureExtensionWithSchemaVersionCascade(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionMissing(mock, "pg_stat_statements")
+	mock.ExpectExec(`^CREATE EXTENSION IF NOT EXISTS "pg_stat_statements" SCHEMA "monitoring" VERSION '1\.10' CASCADE$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Schema: "monitoring", Version: "1.10", Cascade: true}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionInstalledIsNoOp(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pgcrypto", "1.3", "public")
+	// No CREATE: installed and no version pinned.
+
+	p := &Provisioner{}
+	if err := p.ensureExtension(context.Background(), mockDB, config.Extension{Name: "pgcrypto"}, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionVersionDriftUpdates(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	expectUpdatePath(mock, "pg_stat_statements", "1.9", "1.10", true)
+	mock.ExpectExec(`^ALTER EXTENSION "pg_stat_statements" UPDATE TO '1\.10'$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A pinned version below the installed one (or one without an update script) can't be reached
+// with ALTER EXTENSION ... UPDATE TO: warn and keep the installed version instead of failing.
+func TestEnsureExtensionWithoutUpdatePathWarnsAndSkips(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.10", "public")
+	expectUpdatePath(mock, "pg_stat_statements", "1.10", "1.9", false)
+	// No ALTER EXTENSION.
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.9"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "No update path") {
+		t.Errorf("expected no-update-path warning, got logs:\n%s", logs.String())
+	}
+}
+
+func expectUpdatePath(mock sqlmock.Sqlmock, name, from, to string, exists bool) {
+	mock.ExpectQuery(`FROM pg_extension_update_paths\(\$1\)`).WithArgs(name, from, to).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(exists))
+}
+
+func TestEnsureExtensionVersionDriftStrategyCreateSkips(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	// No ALTER with strategy=create.
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "create"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureExtensionSchemaDriftWarnsOnly(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pgcrypto", "1.3", "public")
+	// No ALTER EXTENSION ... SET SCHEMA.
+
+	var logs strings.Builder
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "pgcrypto", Schema: "crypto"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "installed_schema=public") {
+		t.Errorf("expected schema drift warning, got logs:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `SET SCHEMA \"crypto\"`) {
+		t.Errorf("expected SET SCHEMA hint for a relocatable extension, got logs:\n%s", logs.String())
+	}
+}
+
+// A non-relocatable extension (e.g. plpgsql, or one with a fixed schema) can't be moved
+// with SET SCHEMA: the hint must say to drop and recreate it instead.
+func TestEnsureExtensionSchemaDriftNonRelocatableHint(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectExtensionInstalledRelocatable(mock, "plpgsql", "1.0", "pg_catalog", false)
+
+	p := &Provisioner{}
+	ext := config.Extension{Name: "plpgsql", Schema: "app"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), "SET SCHEMA") || !strings.Contains(logs.String(), "not relocatable") {
+		t.Errorf("expected drop-and-recreate hint without SET SCHEMA, got logs:\n%s", logs.String())
+	}
+}
+
+func TestDryRunExtensionVersionUpdateDoesNotExecute(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectExtensionInstalled(mock, "pg_stat_statements", "1.9", "public")
+	expectUpdatePath(mock, "pg_stat_statements", "1.9", "1.10", true)
+
+	p := &Provisioner{opts: dryRunOptions()}
+	ext := config.Extension{Name: "pg_stat_statements", Version: "1.10"}
+	if err := p.ensureExtension(context.Background(), mockDB, ext, "update"); err != nil {
+		t.Fatalf("ensureExtension: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const preloadWarning = "requires shared_preload_libraries"
+
+func expectShowPreload(mock sqlmock.Sqlmock, loaded string) {
+	mock.ExpectQuery(`SHOW shared_preload_libraries`).
+		WillReturnRows(sqlmock.NewRows([]string{"shared_preload_libraries"}).AddRow(loaded))
+}
+
+func expectExtensionExists(mock sqlmock.Sqlmock, name string, exists bool) {
+	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM pg_extension WHERE extname = \$1\)`).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(exists))
+}
+
+func TestParsePreloadLibraries(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want []string
+	}{
+		{"", nil},
+		{"pg_stat_statements", []string{"pg_stat_statements"}},
+		{`auto_explain, "pg_cron" ,pg_stat_statements`, []string{"auto_explain", "pg_cron", "pg_stat_statements"}},
+		{"$libdir/pg_stat_statements", []string{"pg_stat_statements"}},
+		{"pg_stat_statements.so, timescaledb.dylib", []string{"pg_stat_statements", "timescaledb"}},
+		{`"$libdir/pg_cron.so"`, []string{"pg_cron"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got := parsePreloadLibraries(tt.raw)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parsePreloadLibraries(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+			for _, lib := range tt.want {
+				if !got[lib] {
+					t.Errorf("parsePreloadLibraries(%q) = %v, missing %q", tt.raw, got, lib)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckPreloadLibrariesSkipsQueryWhenNotNeeded(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	// No SHOW expected.
+
+	p := &Provisioner{}
+	database := config.Database{Name: "db", Extensions: []config.Extension{{Name: "pgcrypto"}}}
+	if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pg_cron cannot be created without its library preloaded: the run must fail before any
+// schema or extension of the database is touched.
+func TestProvisionDatabaseResourcesFailsEarlyWhenCreateNeedsPreload(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectShowPreload(mock, "pg_stat_statements")
+	expectExtensionExists(mock, "pg_cron", false)
+	// No CREATE SCHEMA / CREATE EXTENSION.
+
+	database := config.Database{
+		Name:       "db",
+		Schemas:    []config.Schema{{Name: "app"}},
+		Extensions: []config.Extension{{Name: "pgcrypto"}, {Name: "pg_cron"}},
+	}
+	p := &Provisioner{}
+	err = p.provisionDatabaseResources(context.Background(), mockDB, database, "update")
+	if err == nil || !strings.Contains(err.Error(), "-c shared_preload_libraries=pg_cron") {
+		t.Fatalf("expected actionable preload error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An already installed pg_cron whose library is no longer preloaded only warns: the run can
+// proceed, the extension fails when used.
+func TestCheckPreloadLibrariesInstalledCreateNeedsPreloadWarns(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectShowPreload(mock, "")
+	expectExtensionExists(mock, "pg_cron", true)
+
+	p := &Provisioner{}
+	database := config.Database{Name: "db", Extensions: []config.Extension{{Name: "pg_cron"}}}
+	if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+		t.Fatalf("checkPreloadLibraries: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), preloadWarning) || !strings.Contains(logs.String(), "library=pg_cron") {
+		t.Errorf("expected preload warning, got logs:\n%s", logs.String())
+	}
+}
+
+// pg_stat_statements installs without preloading: it is checked before CREATE EXTENSION,
+// warned about, and still created.
+func TestProvisionDatabaseResourcesWarnsAndCreatesPgStatStatements(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	mock.MatchExpectationsInOrder(true)
+	expectShowPreload(mock, "auto_explain")
+	expectExtensionMissing(mock, "pg_stat_statements")
+	mock.ExpectExec(`CREATE EXTENSION IF NOT EXISTS "pg_stat_statements"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	database := config.Database{Name: "db", Extensions: []config.Extension{{Name: "pg_stat_statements"}}}
+	p := &Provisioner{}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), preloadWarning) || !strings.Contains(logs.String(), "library=pg_stat_statements") {
+		t.Errorf("expected preload warning, got logs:\n%s", logs.String())
+	}
+}
+
+// shared_preload_libraries is server-wide: it is read once per run and each missing library
+// is warned about once, however many databases configure it.
+func TestCheckPreloadLibrariesOncePerRun(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	expectShowPreload(mock, "")
+
+	p := &Provisioner{}
+	for _, name := range []string{"db1", "db2"} {
+		database := config.Database{Name: name, Extensions: []config.Extension{{Name: "pg_stat_statements"}}}
+		if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(logs.String(), preloadWarning); n != 1 {
+		t.Errorf("expected 1 preload warning, got %d:\n%s", n, logs.String())
+	}
+}
+
+// Without permission to read the setting, the check is skipped (logged once at INFO) and
+// even pg_cron is left to CREATE EXTENSION.
+func TestCheckPreloadLibrariesSkippedWhenShowFails(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	mock.ExpectQuery(`SHOW shared_preload_libraries`).WillReturnError(fmt.Errorf("permission denied"))
+
+	p := &Provisioner{}
+	for _, name := range []string{"db1", "db2"} {
+		database := config.Database{Name: name, Extensions: []config.Extension{{Name: "pg_cron"}}}
+		if err := p.checkPreloadLibraries(context.Background(), mockDB, database); err != nil {
+			t.Fatalf("expected the check to be skipped, got: %v", err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(logs.String(), "level=INFO msg=\"Could not read shared_preload_libraries"); n != 1 {
+		t.Errorf("expected 1 info log about the skipped check, got %d:\n%s", n, logs.String())
 	}
 }

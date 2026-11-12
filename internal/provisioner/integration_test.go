@@ -25,17 +25,22 @@ import (
 	"postgres-provisioner/internal/provisioner"
 )
 
-func setupPostgres(t *testing.T) (*sql.DB, db.ConnConfig, func()) {
+// setupPostgres starts a PostgreSQL container. serverArgs are appended to the postgres
+// command line, e.g. "-c", "shared_preload_libraries=pg_stat_statements".
+func setupPostgres(t *testing.T, serverArgs ...string) (*sql.DB, db.ConnConfig, func()) {
 	t.Helper()
 	ctx := context.Background()
 
-	pgContainer, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+	opts := []testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("postgres"),
 		postgres.WithUsername("admin"),
 		postgres.WithPassword("adminpass"),
 		postgres.BasicWaitStrategies(),
-	)
+	}
+	if len(serverArgs) > 0 {
+		opts = append(opts, testcontainers.WithCmdArgs(serverArgs...))
+	}
+	pgContainer, err := postgres.Run(ctx, "postgres:16-alpine", opts...)
 	if err != nil {
 		t.Fatalf("failed to start postgres container: %v", err)
 	}
@@ -1936,5 +1941,203 @@ roles:
 	logs := captureLogsDuring(t, run)
 	if strings.Contains(logs, "Applying setting") {
 		t.Errorf("second run should not change search_path, logs:\n%s", logs)
+	}
+}
+
+// installedExtension returns the installed version and schema of an extension in dbName.
+func installedExtension(t *testing.T, connCfg db.ConnConfig, dbName, ext string) (version, schema string) {
+	t.Helper()
+	cfg := connCfg
+	cfg.DBName = dbName
+	conn, err := db.Connect(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect to %s: %v", dbName, err)
+	}
+	defer conn.Close()
+	err = conn.QueryRowContext(context.Background(), `
+		SELECT e.extversion, n.nspname FROM pg_extension e
+		JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = $1`, ext,
+	).Scan(&version, &schema)
+	if err != nil {
+		t.Fatalf("look up extension %s: %v", ext, err)
+	}
+	return version, schema
+}
+
+func TestIntegrationExtensionInProvisionedSchema(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "extdb"
+    schemas:
+      - name: "crypto"
+    extensions:
+      - { name: pgcrypto, schema: crypto }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	for run := 1; run <= 2; run++ {
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run %d failed: %v", run, err)
+		}
+	}
+
+	if _, schema := installedExtension(t, connCfg, "extdb", "pgcrypto"); schema != "crypto" {
+		t.Errorf("expected pgcrypto in schema crypto, got %q", schema)
+	}
+}
+
+func TestIntegrationExtensionVersionUpdate(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	runWithVersion := func(version string) {
+		t.Helper()
+		cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+databases:
+  - name: "extversiondb"
+    extensions:
+      - { name: pg_stat_statements, version: %q }
+`, version)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run (version %s) failed: %v", version, err)
+		}
+	}
+
+	runWithVersion("1.9")
+	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.9" {
+		t.Fatalf("expected pg_stat_statements 1.9, got %s", version)
+	}
+
+	runWithVersion("1.10")
+	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.10" {
+		t.Errorf("expected pg_stat_statements updated to 1.10, got %s", version)
+	}
+
+	// No update path for a downgrade: the run succeeds and keeps the installed version.
+	runWithVersion("1.9")
+	if version, _ := installedExtension(t, connCfg, "extversiondb", "pg_stat_statements"); version != "1.10" {
+		t.Errorf("expected pg_stat_statements to stay at 1.10 after a pinned downgrade, got %s", version)
+	}
+}
+
+// TestIntegrationPreloadLibraryWarning verifies the shared_preload_libraries warning for
+// pg_stat_statements against a server without and with the library preloaded.
+func TestIntegrationPreloadLibraryWarning(t *testing.T) {
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "statsdb"
+    extensions: ["pg_stat_statements"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runAndCaptureLogs := func(t *testing.T, serverArgs ...string) string {
+		t.Helper()
+		adminDB, connCfg, cleanup := setupPostgres(t, serverArgs...)
+		defer cleanup()
+
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		defer slog.SetDefault(prev)
+
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background()); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+		return logs.String()
+	}
+
+	t.Run("not preloaded", func(t *testing.T) {
+		logs := runAndCaptureLogs(t)
+		if !strings.Contains(logs, "requires shared_preload_libraries") || !strings.Contains(logs, "library=pg_stat_statements") {
+			t.Errorf("expected preload warning, logs:\n%s", logs)
+		}
+	})
+	t.Run("preloaded", func(t *testing.T) {
+		logs := runAndCaptureLogs(t, "-c", "shared_preload_libraries=pg_stat_statements")
+		if strings.Contains(logs, "requires shared_preload_libraries") {
+			t.Errorf("expected no preload warning, logs:\n%s", logs)
+		}
+	})
+}
+
+// TestIntegrationPreloadRequiredForCreate verifies that an extension which can't be created
+// without its library preloaded fails the run with an actionable error before anything in the
+// database is changed.
+func TestIntegrationPreloadRequiredForCreate(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "crondb"
+    schemas:
+      - name: "app"
+    extensions: ["pgcrypto", "pg_cron"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "-c shared_preload_libraries=pg_cron") {
+		t.Fatalf("expected preload error for pg_cron, got: %v", err)
+	}
+
+	dbCfg := connCfg
+	dbCfg.DBName = "crondb"
+	conn, err := db.Connect(context.Background(), dbCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var changes int
+	err = conn.QueryRow(`SELECT (SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto')
+		+ (SELECT count(*) FROM pg_namespace WHERE nspname = 'app')`).Scan(&changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changes != 0 {
+		t.Errorf("expected no schema or extension to be created before the preload error")
+	}
+}
+
+// TestIntegrationExtensionSchemaDriftHint verifies that schema drift on a non-relocatable
+// extension (plpgsql, installed in pg_catalog) warns without suggesting SET SCHEMA.
+func TestIntegrationExtensionSchemaDriftHint(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	cfg, err := config.Load(writeTestConfig(t, `
+databases:
+  - name: "driftdb"
+    extensions:
+      - { name: plpgsql, schema: public }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background()); err != nil {
+		t.Fatalf("provisioning run failed: %v", err)
+	}
+	if !strings.Contains(logs.String(), "not relocatable") || strings.Contains(logs.String(), "SET SCHEMA") {
+		t.Errorf("expected drop-and-recreate hint, logs:\n%s", logs.String())
 	}
 }

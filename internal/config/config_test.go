@@ -808,8 +808,8 @@ databases:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Databases[0].Extensions[0] != "pgcrypto" {
-		t.Errorf("expected extension 'pgcrypto', got %q", cfg.Databases[0].Extensions[0])
+	if cfg.Databases[0].Extensions[0].Name != "pgcrypto" {
+		t.Errorf("expected extension 'pgcrypto', got %q", cfg.Databases[0].Extensions[0].Name)
 	}
 }
 
@@ -1465,6 +1465,96 @@ databases:
 `)
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "databases[0].grants[0].columns[0]: environment variable OBJ_COLUMN_UNSET is not set") {
+		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
+	}
+}
+
+func TestExtensionRejectsNonScalar(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - ["pgcrypto"]
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "extension must be a name or a mapping") {
+		t.Fatalf("expected extension shape error, got: %v", err)
+	}
+}
+
+func TestExtensionRejectsUnknownField(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - name: pgcrypto
+        shema: crypto
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), `line 6: unknown extension field "shema"`) {
+		t.Fatalf("expected unknown field error with line, got: %v", err)
+	}
+}
+
+func TestExtensionScalarAndMappingForms(t *testing.T) {
+	t.Setenv("EXT_SCHEMA", "monitoring")
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - pgcrypto
+      - name: pg_stat_statements
+        schema: "${EXT_SCHEMA}"
+        version: "1.10"
+        cascade: true
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	exts := cfg.Databases[0].Extensions
+	if exts[0] != (Extension{Name: "pgcrypto"}) {
+		t.Errorf("unexpected scalar extension: %+v", exts[0])
+	}
+	want := Extension{Name: "pg_stat_statements", Schema: "monitoring", Version: "1.10", Cascade: true}
+	if exts[1] != want {
+		t.Errorf("got %+v, want %+v", exts[1], want)
+	}
+}
+
+func TestValidationExtensionErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		exts    string
+		wantErr string
+	}{
+		{"duplicate", `["pgcrypto", {name: pgcrypto, version: "1.3"}]`, `databases[0].extensions[1]: duplicate extension "pgcrypto"`},
+		{"missing name", `[{schema: app}]`, "databases[0].extensions[0]: name must not be empty"},
+		{"null byte in version", `[{name: pgcrypto, version: "1\u0000"}]`, "databases[0].extensions[0].version: contains null byte"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions: `+tt.exts+`
+`))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestLoadReportsUnresolvedExtensionReference(t *testing.T) {
+	path := writeTempConfig(t, `
+databases:
+  - name: "db1"
+    extensions:
+      - { name: pgcrypto, schema: "${EXT_SCHEMA_UNSET}" }
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "databases[0].extensions[0].schema: environment variable EXT_SCHEMA_UNSET is not set") {
 		t.Fatalf("expected path-qualified unresolved reference error, got: %v", err)
 	}
 }

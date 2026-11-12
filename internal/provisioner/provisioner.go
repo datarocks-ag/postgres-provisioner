@@ -68,6 +68,7 @@ type Provisioner struct {
 	connCfg db.ConnConfig
 	cfg     *config.Config
 	opts    Options
+	preload preloadState
 }
 
 // New creates a new Provisioner.
@@ -81,8 +82,10 @@ func New(adminDB *sql.DB, connCfg db.ConnConfig, cfg *config.Config, opts Option
 }
 
 // Run executes the full provisioning sequence:
-// Roles (+ settings) -> Role memberships -> Databases (+ settings) -> (per-db) Extensions -> Schemas -> Revokes -> Grants -> Migrations -> Object grants
+// Roles (+ settings) -> Role memberships -> Databases (+ settings) -> (per-db) shared_preload_libraries
+// check -> Schemas -> Extensions -> Revokes -> Grants -> Migrations -> Object grants
 func (p *Provisioner) Run(ctx context.Context) error {
+	p.preload = preloadState{}
 	if p.opts.DryRun {
 		slog.Info("Starting provisioning in DRY RUN mode — no changes will be applied")
 	} else {
@@ -183,14 +186,13 @@ func (p *Provisioner) applyDatabaseSettings(ctx context.Context, database config
 }
 
 func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sql.DB, database config.Database, dbStrategy string) error {
-	// 4. Extensions (always applied — CREATE EXTENSION IF NOT EXISTS is idempotent)
-	for _, ext := range database.Extensions {
-		if err := p.ensureExtension(ctx, dbConn, ext); err != nil {
-			return fmt.Errorf("provisioning extension %q in database %q: %w", ext, database.Name, err)
-		}
+	// Before any change, so an extension that can't be created without a preloaded library
+	// fails the run with an actionable error instead of a CREATE EXTENSION error midway.
+	if err := p.checkPreloadLibraries(ctx, dbConn, database); err != nil {
+		return err
 	}
 
-	// 5. Schemas (strategy inherited from database)
+	// 4. Schemas (strategy inherited from database)
 	for _, schema := range database.Schemas {
 		owner := schema.Owner
 		if owner == "" {
@@ -198,6 +200,13 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		}
 		if err := p.ensureSchema(ctx, dbConn, schema.Name, owner, dbStrategy); err != nil {
 			return fmt.Errorf("provisioning schema %q in database %q: %w", schema.Name, database.Name, err)
+		}
+	}
+
+	// 5. Extensions (after schemas, so an extension can be installed into a provisioned schema)
+	for _, ext := range database.Extensions {
+		if err := p.ensureExtension(ctx, dbConn, ext, dbStrategy); err != nil {
+			return fmt.Errorf("provisioning extension %q in database %q: %w", ext.Name, database.Name, err)
 		}
 	}
 

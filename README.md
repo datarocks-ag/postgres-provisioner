@@ -169,6 +169,67 @@ databases:
   the admin user, changes how unqualified names in migrations resolve. Schema-qualify
   names in migrations or `SET search_path` at their top if that matters.
 
+### Extensions
+
+Extensions are listed by name, or as a mapping with options:
+
+```yaml
+databases:
+  - name: "myapp"
+    schemas:
+      - name: "crypto"
+    extensions:
+      - "uuid-ossp"                              # CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
+      - name: "pgcrypto"
+        schema: "crypto"                         # install into a (provisioned) schema
+      - name: "pg_stat_statements"
+        version: "1.10"                          # pin; updated via ALTER EXTENSION ... UPDATE TO
+        cascade: true                            # also install required extensions
+```
+
+- Missing extensions are created with the given `schema`, `version` and `cascade`.
+- **Without `schema`, PostgreSQL picks it:** the schema fixed by the extension's control file if
+  any, otherwise the first existing schema in the admin connection's `search_path`. With the
+  default `search_path` (`"$user", public`), a schema named like the admin login role (e.g. a
+  provisioned schema `admin` when `POSTGRES_USER=admin`) is chosen over `public`. Since schemas
+  are provisioned before extensions, such a schema already exists when extensions are created.
+  Set `schema: public` explicitly if that matters. The provisioner doesn't add `SCHEMA public`
+  itself, because that would fail for extensions whose control file fixes a different schema.
+- An installed extension at a different pinned `version` is updated (`ALTER EXTENSION ... UPDATE TO`).
+  Without `version`, installed extensions are never updated. `strategy: create` never updates.
+  If the server has no update path from the installed to the pinned version (a downgrade, or a
+  version it doesn't ship, per `pg_extension_update_paths`), a warning is logged and the
+  installed version is kept.
+- An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
+  breaks references to its objects — a warning is logged instead. Its hint suggests `SET SCHEMA`
+  only for relocatable extensions (`pg_extension.extrelocatable`); any other extension must be
+  dropped and recreated (`DROP EXTENSION ... CASCADE` also drops objects depending on it).
+- `cascade: true` installs missing dependencies at their default versions, into the configured
+  `schema` of the dependent extension. Without one, each goes to its default schema, as a
+  schema-less `CREATE EXTENSION` would; a dependency whose control file fixes its schema always
+  goes there. To give a dependency its own `schema` or `version`, list it separately **before**
+  the dependent extension; if it is listed after, it is already installed by then, so a differing
+  `version` is updated as above and a differing `schema` only produces the warning.
+- **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` need their library in the
+  server's `shared_preload_libraries` (which needs a restart). Before touching a database, the
+  provisioner reads the setting once per run (`$libdir/` prefixes and `.so`/`.dylib` suffixes are
+  ignored) and, for a library that isn't loaded:
+  - `pg_cron`, `timescaledb`: `CREATE EXTENSION` itself fails without preloading, so if the
+    extension isn't installed yet the run **fails** with an error naming the server flag to add.
+    If it is already installed, a warning is logged.
+  - `pg_stat_statements`: installs fine but fails when used, so it is installed and a warning
+    is logged (once per run).
+
+  If the admin role may not read the setting (not a superuser and no `pg_read_all_settings`),
+  the check is skipped and logged at info level. For postgres_exporter's `pg_stat_statements`
+  metrics, start the server with the library, e.g. in Docker Compose:
+
+  ```yaml
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+  ```
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -251,8 +312,8 @@ services:
 1. **Roles** — created or updated idempotently, then role `settings`
 2. **Role memberships** — `GRANT <group> TO <role>` for each `member_of` entry not yet granted
 3. **Databases** — created idempotently, owner set, then database `settings` and `role_settings`
-4. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database)
-5. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
+4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
+5. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database). Runs after schemas, so extensions can be installed into a provisioned schema (see [Extensions](#extensions) for where an extension without `schema` lands).
 6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
 7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
 8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
