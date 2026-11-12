@@ -70,15 +70,16 @@ type expander struct {
 // expand replaces ${VAR} and ${VAR:-default} references in s. path identifies the
 // config field in error messages.
 func (e *expander) expand(path, s string) string {
-	out, _ := e.expandReferences(path, s)
+	out, _ := e.expandReferences(path, s, false)
 	return out
 }
 
 // expandSecret expands a secret field and additionally rejects references that resolve
 // to an empty string: an empty password means "no password", which would otherwise
-// hide a missing secret behind a successful run.
+// hide a missing secret behind a successful run. Error messages never quote the
+// field's raw text, which may contain (part of) a literal secret.
 func (e *expander) expandSecret(path, s string) string {
-	expanded, hasReference := e.expandReferences(path, s)
+	expanded, hasReference := e.expandReferences(path, s, true)
 	if expanded == "" && hasReference {
 		e.errs = append(e.errs, fmt.Errorf("%s: environment variable reference resolved to an empty value", path))
 	}
@@ -88,7 +89,7 @@ func (e *expander) expandSecret(path, s string) string {
 // expandReferences scans s left to right, resolving each ${...} reference, and reports
 // whether s contained any reference. A reference ends at the first '}'; an
 // unterminated "${" is kept as literal text, and "$${" yields a literal "${".
-func (e *expander) expandReferences(path, s string) (string, bool) {
+func (e *expander) expandReferences(path, s string, secret bool) (string, bool) {
 	var out strings.Builder
 	hasReference := false
 	for {
@@ -117,7 +118,7 @@ func (e *expander) expandReferences(path, s string) (string, bool) {
 			s = s[nestedReferenceEnd(s, start)+1:]
 			continue
 		}
-		out.WriteString(e.resolve(path, s[start:end+1]))
+		out.WriteString(e.resolve(path, s[start:end+1], secret))
 		s = s[end+1:]
 	}
 	out.WriteString(s)
@@ -144,12 +145,17 @@ func nestedReferenceEnd(s string, start int) int {
 }
 
 // resolve returns the value for a single ${...} reference, recording an error and
-// returning the reference unchanged when it cannot be resolved.
-func (e *expander) resolve(path, reference string) string {
+// returning the reference unchanged when it cannot be resolved. For secret fields an
+// invalid reference is reported without quoting it.
+func (e *expander) resolve(path, reference string, secret bool) string {
 	body := reference[2 : len(reference)-1]
 	name, defaultVal, hasDefault := strings.Cut(body, ":-")
 	if !envVarNamePattern.MatchString(name) {
-		e.errs = append(e.errs, fmt.Errorf("%s: invalid environment variable reference %q", path, reference))
+		if secret {
+			e.errs = append(e.errs, fmt.Errorf("%s: invalid environment variable reference", path))
+		} else {
+			e.errs = append(e.errs, fmt.Errorf("%s: invalid environment variable reference %q", path, reference))
+		}
 		return reference
 	}
 

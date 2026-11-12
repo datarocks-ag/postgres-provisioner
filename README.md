@@ -184,7 +184,8 @@ Rules:
   with trailing newlines trimmed (max 64 KiB). Setting both `VAR` and `VAR_FILE` is an error.
 - **Passwords must not resolve to empty.** A `password` containing a reference that expands
   to `""` fails, since an empty password would silently provision the role without one.
-- Error messages never contain resolved values or file contents.
+- Error messages never contain resolved values or file contents, and never quote the raw
+  text of a `password` field.
 - Default values cannot contain `}` or another reference: nested references such as
   `${A:-${B}}` are rejected with an error.
 

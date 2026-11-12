@@ -269,6 +269,32 @@ roles:
 	}
 }
 
+func TestInvalidReferenceInPasswordIsNotQuoted(t *testing.T) {
+	const sentinel = "pw-SENTINEL-7f3a"
+	path := writeTempConfig(t, `
+roles:
+  - name: "app_user"
+    password: "${`+sentinel+` x}"
+databases:
+  - name: "${bad name}"
+    owner: "app_user"
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "roles[0].password: invalid environment variable reference") {
+		t.Errorf("expected path-qualified error for the password, got: %v", err)
+	}
+	if strings.Contains(msg, sentinel) {
+		t.Errorf("error quoted raw password text: %v", err)
+	}
+	if !strings.Contains(msg, `databases[0].name: invalid environment variable reference "${bad name}"`) {
+		t.Errorf("expected non-secret fields to quote the reference, got: %v", err)
+	}
+}
+
 func TestLookupEnvOrFileUnset(t *testing.T) {
 	val, ok, err := LookupEnvOrFile("LOOKUP_DEFINITELY_UNSET")
 	if err != nil || ok || val != "" {
