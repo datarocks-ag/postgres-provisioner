@@ -34,6 +34,12 @@ func TestExpandResolvesReferences(t *testing.T) {
 		{name: "default when empty", env: map[string]string{"EXP_A": ""}, input: "${EXP_A:-fallback}", want: "fallback"},
 		{name: "empty default when empty", env: map[string]string{"EXP_A": ""}, input: "${EXP_A:-}", want: ""},
 		{name: "default when file is empty", files: map[string]string{"EXP_F": "\n"}, input: "${EXP_F:-fallback}", want: "fallback"},
+		{name: "escaped reference", input: "$${EXP_UNSET}", want: "${EXP_UNSET}"},
+		{name: "escaped invalid reference is not validated", input: "a$${foo bar}b", want: "a${foo bar}b"},
+		{name: "escaped unterminated reference", input: "$${", want: "${"},
+		{name: "escape next to reference", env: map[string]string{"EXP_A": "x"}, input: "$${EXP_A}${EXP_A}", want: "${EXP_A}x"},
+		{name: "dollar before escape", input: "$$${EXP_UNSET}", want: "$${EXP_UNSET}"},
+		{name: "lone dollars untouched", input: "$a$$b$", want: "$a$$b$"},
 		{name: "file with trailing LF", files: map[string]string{"EXP_F": "from-file\n"}, input: "${EXP_F}", want: "from-file"},
 		{name: "file with trailing CRLF", files: map[string]string{"EXP_F": "from-file\r\n"}, input: "${EXP_F}", want: "from-file"},
 		{name: "file without newline", files: map[string]string{"EXP_F": "from-file"}, input: "${EXP_F}", want: "from-file"},
@@ -191,6 +197,27 @@ roles:
 				t.Fatalf("expected empty-password error, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadPasswordWithEscapedReference(t *testing.T) {
+	t.Setenv("ESC_PW_PART", "tail")
+	path := writeTempConfig(t, `
+roles:
+  - name: "app_user"
+    password: "pa$${not_a_var}ss-${ESC_PW_PART}"
+  - name: "other_user"
+    password: "$${ONLY_ESCAPED}"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := cfg.Roles[0].Password, "pa${not_a_var}ss-tail"; got != want {
+		t.Errorf("password = %q, want %q", got, want)
+	}
+	if got, want := cfg.Roles[1].Password, "${ONLY_ESCAPED}"; got != want {
+		t.Errorf("password = %q, want %q", got, want)
 	}
 }
 

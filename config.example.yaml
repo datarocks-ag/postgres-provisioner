@@ -4,6 +4,7 @@
 #   ${VAR}          value of VAR, or contents of the file in VAR_FILE; fails if unset
 #   ${VAR:-default} falls back to "default" when unset or empty
 #   ${VAR:-}        optional, empty when unset
+#   $${             literal "${" (escape; not expanded)
 #
 # Strategy: "update" (default) creates or updates resources.
 #           "create" only creates if missing, skips existing.

@@ -87,7 +87,7 @@ func (e *expander) expandSecret(path, s string) string {
 
 // expandReferences scans s left to right, resolving each ${...} reference, and reports
 // whether s contained any reference. A reference ends at the first '}'; an
-// unterminated "${" is kept as literal text.
+// unterminated "${" is kept as literal text, and "$${" yields a literal "${".
 func (e *expander) expandReferences(path, s string) (string, bool) {
 	var out strings.Builder
 	hasReference := false
@@ -95,6 +95,13 @@ func (e *expander) expandReferences(path, s string) (string, bool) {
 		start := strings.Index(s, "${")
 		if start < 0 {
 			break
+		}
+		if start > 0 && s[start-1] == '$' {
+			// "$${" escapes a literal "${": emitted as-is, neither expanded nor validated.
+			out.WriteString(s[:start-1])
+			out.WriteString("${")
+			s = s[start+2:]
+			continue
 		}
 		length := strings.IndexByte(s[start+2:], '}')
 		if length < 0 {
