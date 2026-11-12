@@ -2565,6 +2565,63 @@ func TestProvisionDatabaseResourcesMigrationsDisabledToleratesMissingTables(t *t
 	}
 }
 
+// TestDryRunProvisionDatabaseResourcesPreviewsObjectGrants runs the whole per-database
+// phase in dry-run on a fresh database: migrations are only previewed, so the table they
+// would create is missing; that must be logged, not fail, and the GRANT is previewed.
+func TestDryRunProvisionDatabaseResourcesPreviewsObjectGrants(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+	logs := captureLogs(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "V0001__init.sql"), []byte("CREATE TABLE app.users (id int);"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	database := config.Database{
+		Name: "mydb",
+		Grants: []config.Grant{
+			{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users"}, Columns: []string{"id"}},
+			{Role: "app", Privileges: []string{"USAGE"}, OnSchema: "app"},
+		},
+		Migrations: &config.Migrations{Directory: dir},
+	}
+
+	// Only read-only queries: no Exec, Begin or Commit in dry-run.
+	mock.ExpectQuery(`SELECT version, type, checksum FROM _schema_migrations`).
+		WillReturnError(&pq.Error{Code: pgUndefinedTable, Message: `relation "_schema_migrations" does not exist`})
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "users").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
+
+	p := &Provisioner{opts: dryRunOptions()}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := logs.String()
+	for _, want := range []string{
+		`[DRY RUN] would execute" sql="GRANT USAGE ON SCHEMA \"app\" TO \"app\""`,
+		`[DRY RUN] would apply migration" file=V0001__init.sql`,
+		`[DRY RUN] tables not present yet; a real run fails unless pending migrations create them" tables=app.users`,
+		`[DRY RUN] would execute" sql="GRANT SELECT (\"id\") ON TABLE \"app\".\"users\" TO \"app\""`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected log containing %s, got:\n%s", want, out)
+		}
+	}
+	// Order: the table grant is previewed after the migration plan.
+	if strings.Index(out, "would apply migration") > strings.Index(out, "ON TABLE") {
+		t.Errorf("expected migration preview before table grant:\n%s", out)
+	}
+}
+
 // TestObjectGrantsRunAfterMigrations checks the per-database order: schema-level grants,
 // then migrations, then on_tables grants — even when on_tables is listed first.
 func TestObjectGrantsRunAfterMigrations(t *testing.T) {
