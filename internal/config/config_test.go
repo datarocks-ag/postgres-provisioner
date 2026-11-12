@@ -1022,3 +1022,97 @@ roles:
 		})
 	}
 }
+
+func TestValidationMemberOfCycles(t *testing.T) {
+	cases := []struct {
+		name    string
+		roles   string
+		wantErr string
+	}{
+		{
+			name: "two-role cycle",
+			roles: `
+  - name: "a"
+    member_of: ["b"]
+  - name: "b"
+    member_of: ["a"]`,
+			wantErr: "roles[1].member_of[0]: circular role membership a -> b -> a",
+		},
+		{
+			name: "three-role cycle",
+			roles: `
+  - name: "a"
+    member_of: ["pg_monitor", "b"]
+  - name: "b"
+    member_of: ["c"]
+  - name: "c"
+    member_of: ["a"]`,
+			wantErr: "roles[2].member_of[0]: circular role membership a -> b -> c -> a",
+		},
+		{
+			name: "cycle not reachable from first role",
+			roles: `
+  - name: "a"
+    member_of: ["pg_monitor"]
+  - name: "b"
+    member_of: ["c"]
+  - name: "c"
+    member_of: ["b"]`,
+			wantErr: "roles[2].member_of[0]: circular role membership b -> c -> b",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, "roles:"+tc.roles+"\n")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidationMemberOfAcyclic(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles string
+	}{
+		{
+			name: "chain",
+			roles: `
+  - name: "a"
+    member_of: ["b"]
+  - name: "b"
+    member_of: ["c"]
+  - name: "c"
+    member_of: ["pg_monitor"]`,
+		},
+		{
+			name: "diamond",
+			roles: `
+  - name: "a"
+    member_of: ["b", "c"]
+  - name: "b"
+    member_of: ["d"]
+  - name: "c"
+    member_of: ["d"]
+  - name: "d"`,
+		},
+		{
+			name: "shared undeclared group",
+			roles: `
+  - name: "a"
+    member_of: ["pg_monitor"]
+  - name: "b"
+    member_of: ["pg_monitor", "a"]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, "roles:"+tc.roles+"\n")
+			if _, err := Load(path); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
