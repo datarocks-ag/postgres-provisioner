@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provisioner sessions ignore risky role/database defaults** — every provisioner connection sets `statement_timeout=0`, `lock_timeout=0`, `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off` as connection startup options, so settings such as a read-only database default or a short `statement_timeout` can't break schema creation or migrations. `search_path` is not overridden.
 - **Duplicate extensions in a database are rejected** at load time, as are unknown keys in an extension mapping (e.g. a misspelled `shema`).
 - **Schemas are now provisioned before extensions** (per database), so an extension can be installed into a schema the provisioner creates. `CREATE SCHEMA` never depends on an extension, but an extension without `schema` lands in the first existing schema of the admin connection's `search_path`: with the default `"$user", public`, a provisioned schema named like the admin login role now exists at that point and is chosen over `public`. Set `schema: public` explicitly to keep the previous placement.
+- **Documentation restructured** — the README is now an entry point; the documentation moved to `docs/`: a getting-started guide, how it works, how-to guides (monitoring, read-only users, hardening, secrets, application-owned migrations, CDC), deployment (including Kubernetes), a configuration reference, an FAQ and an upgrade guide for 2.0.
 
 ## [1.4.0] - 2026-11-12
 
@@ -92,7 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
-[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/datarocks-ag/postgres-provisioner/releases/tag/v1.0.0

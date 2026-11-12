@@ -3,522 +3,52 @@
 [![CI](https://github.com/datarocks-ag/postgres-provisioner/actions/workflows/ci.yaml/badge.svg)](https://github.com/datarocks-ag/postgres-provisioner/actions/workflows/ci.yaml)
 ![coverage](https://raw.githubusercontent.com/datarocks-ag/postgres-provisioner/badges/.badges/develop/coverage.svg)
 
-A Go CLI tool that idempotently provisions PostgreSQL resources (roles, databases, extensions, schemas, grants, migrations) from a YAML config file. Designed as a Docker Compose init container that runs before your application starts.
+Declarative, idempotent provisioning for PostgreSQL. Describe the roles, databases, schemas,
+privileges, extensions, migrations and publications your services need in one YAML file;
+the provisioner makes the server match it, every time it runs, and then exits.
 
-## Quick Start
+It is built to run **before your application starts**: as a Docker Compose service your app
+`depends_on`, or as a Kubernetes Job or init container.
+
+## Why
+
+Every service needs the same handful of things from Postgres: a login role, a database it
+owns, a schema, the right grants, maybe `pgcrypto`, and a read-only account for reporting or
+monitoring. Usually that ends up in an `init.sql` that only runs on an empty data directory,
+in a pile of manual `psql` sessions, or in the application itself running with far more
+privileges than it needs.
+
+postgres-provisioner replaces that with a file you can review in a pull request:
+
+- **Idempotent** — run it on every deploy. Existing resources are reconciled, not recreated.
+- **Additive and safe** — it never drops roles, databases, schemas, tables or grants that
+  aren't in the config. Removing privileges only happens through explicit `revokes`.
+- **Secret-friendly** — `${VAR}` references, `*_FILE` secrets (Docker/Kubernetes), and
+  passwords are redacted from every log line.
+- **Previewable** — `--dry-run` logs every statement it would execute.
+- **Small** — a single static binary in a `scratch` image.
+
+## Quick start
+
+Two files next to each other. A config:
+
+```yaml
+# config.yaml
+roles:
+  - name: shop_app
+    password: ${SHOP_APP_PASSWORD}
+    options:
+      login: true
+
+databases:
+  - name: shop
+    owner: shop_app
+```
+
+And a Compose file that runs the provisioner once Postgres is healthy:
 
 ```yaml
 # docker-compose.yaml
-services:
-  postgres-provisioner:
-    image: ghcr.io/datarocks-ag/postgres-provisioner:latest
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: adminpass
-      POSTGRES_HOST: postgres
-      PGHELPER_CONFIG_PATH: /config.yaml
-    volumes:
-      - ./config.yaml:/config.yaml:ro
-```
-
-## Configuration
-
-Create a `config.yaml` (see [config.example.yaml](config.example.yaml)):
-
-```yaml
-roles:
-  - name: "app_user"
-    password: "${APP_DB_PASSWORD}"    # env var interpolation
-    options:
-      login: true
-      superuser: false
-  - name: "postgres_exporter"
-    password: "${POSTGRES_EXPORTER_PASSWORD}"
-    member_of: ["pg_monitor"]          # role memberships (see below)
-    options:
-      login: true
-
-databases:
-  - name: "myapp"
-    owner: "app_user"
-    extensions: ["uuid-ossp", "pgcrypto"]
-    schemas:
-      - name: "app"
-        owner: "app_user"
-    grants:
-      - role: "app_user"
-        privileges: ["ALL"]
-        on_schema: "app"
-      - role: "readonly_user"
-        privileges: ["CONNECT"]
-        on_database: true
-      - role: "readonly_user"
-        privileges: ["SELECT"]
-        on_tables_in_schema: "app"
-    migrations:
-      directory: "./migrations/myapp"
-```
-
-### Database options
-
-Databases accept an optional `options:` block for attributes that are fixed at
-`CREATE DATABASE` time and cannot be changed afterward. They apply only when the
-database is first created; if it already exists the options are ignored and a
-warning is logged.
-
-```yaml
-databases:
-  - name: "synapse"
-    owner: "synapse"
-    options:
-      encoding: "UTF8"       # character set encoding
-      lc_collate: "C"        # string sort order
-      lc_ctype: "C"          # character classification
-      template: "template0"  # template database to clone
-      # locale: "C"          # sets lc_collate + lc_ctype together;
-      #                        mutually exclusive with lc_collate / lc_ctype
-```
-
-### Role memberships
-
-`roles[].member_of` grants a role membership in other roles (`GRANT <group> TO <role>`).
-Entries can be roles declared in `roles` or PostgreSQL's
-[predefined roles](https://www.postgresql.org/docs/current/predefined-roles.html)
-such as `pg_monitor`, `pg_read_all_stats`, or `pg_read_all_data`. Memberships are
-applied after all roles exist, so ordering in the config doesn't matter. Existing
-memberships are skipped, and memberships not listed are never revoked (additive only).
-With `strategy: create`, memberships are only applied to newly created roles.
-Circular memberships among declared roles (e.g. `a` member of `b` and `b` member
-of `a`) are rejected at config validation.
-
-**Example: a read-only monitoring user for `postgres_exporter`** — replaces the
-admin/superuser account in the exporter's `DATA_SOURCE_NAME`:
-
-```yaml
-roles:
-  - name: "postgres_exporter"
-    password: "${POSTGRES_EXPORTER_PASSWORD}"
-    member_of: ["pg_monitor"]   # pg_read_all_settings + pg_read_all_stats + pg_stat_scan_tables
-    options:
-      login: true
-      connection_limit: 5
-```
-
-`pg_monitor` can read all statistics views (`pg_stat_activity` including other
-sessions' queries, `pg_stat_replication`, `pg_stat_statements`, WAL/size functions)
-but cannot read or modify table data. Databases grant `CONNECT` to `PUBLIC` by
-default; if you revoked it, add an `on_database` `CONNECT` grant for the exporter role
-on each database it should scrape.
-
-**PostgreSQL 16+ notes:**
-
-- The connecting admin user must hold `ADMIN OPTION` on each group role it grants
-  (e.g. `GRANT pg_monitor TO admin WITH ADMIN OPTION`) unless it is a superuser;
-  `CREATEROLE` alone no longer suffices.
-- A membership's `INHERIT` flag is fixed when it is granted, taken from the member
-  role's `inherit` attribute at that moment. A role created with `inherit: false`
-  gets a non-inheriting membership (it must `SET ROLE` to use the group's
-  privileges), and changing it to `inherit: true` later does **not** update the
-  existing membership — the provisioner sees it as already granted. Fix it manually
-  with `GRANT <group> TO <role> WITH INHERIT TRUE`, or revoke it and re-run.
-
-### Settings
-
-Run-time parameter defaults (`ALTER ROLE/DATABASE ... SET`) for roles, databases, and
-roles within one database. They take effect for new sessions.
-
-```yaml
-roles:
-  - name: "app_user"
-    settings:
-      statement_timeout: "30s"
-      search_path: ["app", "$user", "public"]   # list settings: one element per schema
-      work_mem: null                             # null resets (ALTER ROLE ... RESET)
-
-databases:
-  - name: "myapp"
-    settings:
-      TimeZone: "UTC"                            # ALTER DATABASE myapp SET timezone = 'UTC'
-    role_settings:
-      app_user:                                  # ALTER ROLE app_user IN DATABASE myapp SET ...
-        statement_timeout: "5min"
-```
-
-- Values are scalars (strings, numbers, booleans) or lists. Write list settings such as
-  `search_path` as a YAML list: `search_path: "app, public"` would name a single schema
-  called `app, public`. Values support `${VAR}` expansion.
-- Only settings whose stored value differs are changed. Removing a setting from the config
-  leaves it in place (additive); use `null` to reset it explicitly. Only the literal
-  `null` resets: an empty value (`work_mem:`) or `~` is rejected as a likely forgotten
-  value, and so are null or empty list elements.
-- Names are case-insensitive and validated (`[A-Za-z_][A-Za-z0-9_$]*`, optionally with a
-  `prefix.` for custom parameters). Whether PostgreSQL accepts a parameter for a role or
-  database (e.g. `shared_buffers` can't be set per role) is only checked when it's applied.
-- Use canonical parameter names as listed in `pg_settings`. Obsolete aliases such as
-  `sort_mem` are accepted by PostgreSQL but stored under the canonical name (`work_mem`),
-  so they never compare as up to date and are re-applied on every run.
-- With `strategy: create`, role `settings` are only applied to newly created roles.
-  Database `settings` and `role_settings` follow the database's strategy: they are only
-  applied when the database is newly created, regardless of the role's strategy.
-- Settings also apply to the provisioner's own sessions (it reconnects to each database as
-  the admin user). To keep them from breaking schema creation or migrations, every
-  provisioner connection starts with `statement_timeout=0`, `lock_timeout=0`,
-  `idle_in_transaction_session_timeout=0` and `default_transaction_read_only=off`
-  (connection startup options, which take precedence over role and database defaults).
-  `search_path` is deliberately not overridden: a database `search_path`, or one set for
-  the admin user, changes how unqualified names in migrations resolve. Schema-qualify
-  names in migrations or `SET search_path` at their top if that matters.
-
-### Extensions
-
-Extensions are listed by name, or as a mapping with options:
-
-```yaml
-databases:
-  - name: "myapp"
-    schemas:
-      - name: "crypto"
-    extensions:
-      - "uuid-ossp"                              # CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
-      - name: "pgcrypto"
-        schema: "crypto"                         # install into a (provisioned) schema
-      - name: "pg_stat_statements"
-        version: "1.10"                          # pin; updated via ALTER EXTENSION ... UPDATE TO
-        cascade: true                            # also install required extensions
-```
-
-- Missing extensions are created with the given `schema`, `version` and `cascade`.
-- **Without `schema`, PostgreSQL picks it:** the schema fixed by the extension's control file if
-  any, otherwise the first existing schema in the admin connection's `search_path`. With the
-  default `search_path` (`"$user", public`), a schema named like the admin login role (e.g. a
-  provisioned schema `admin` when `POSTGRES_USER=admin`) is chosen over `public`. Since schemas
-  are provisioned before extensions, such a schema already exists when extensions are created.
-  Set `schema: public` explicitly if that matters. The provisioner doesn't add `SCHEMA public`
-  itself, because that would fail for extensions whose control file fixes a different schema.
-- An installed extension at a different pinned `version` is updated (`ALTER EXTENSION ... UPDATE TO`).
-  Without `version`, installed extensions are never updated. `strategy: create` never updates.
-  If the server has no update path from the installed to the pinned version (a downgrade, or a
-  version it doesn't ship, per `pg_extension_update_paths`), a warning is logged and the
-  installed version is kept.
-- An installed extension in a different `schema` is **not** moved — `ALTER EXTENSION ... SET SCHEMA`
-  breaks references to its objects — a warning is logged instead. Its hint suggests `SET SCHEMA`
-  only for relocatable extensions (`pg_extension.extrelocatable`); any other extension must be
-  dropped and recreated (`DROP EXTENSION ... CASCADE` also drops objects depending on it).
-- `cascade: true` installs missing dependencies at their default versions, into the configured
-  `schema` of the dependent extension. Without one, each goes to its default schema, as a
-  schema-less `CREATE EXTENSION` would; a dependency whose control file fixes its schema always
-  goes there. To give a dependency its own `schema` or `version`, list it separately **before**
-  the dependent extension; if it is listed after, it is already installed by then, so a differing
-  `version` is updated as above and a differing `schema` only produces the warning.
-- **Preload check:** `pg_stat_statements`, `pg_cron` and `timescaledb` need their library in the
-  server's `shared_preload_libraries` (which needs a restart). Before touching a database, the
-  provisioner reads the setting once per run (`$libdir/` prefixes and `.so`/`.dylib` suffixes are
-  ignored) and, for a library that isn't loaded:
-  - `pg_cron`, `timescaledb`: `CREATE EXTENSION` itself fails without preloading, so if the
-    extension isn't installed yet the run **fails** with an error naming the server flag to add.
-    If it is already installed, a warning is logged.
-  - `pg_stat_statements`: installs fine but fails when used, so it is installed and a warning
-    is logged (once per run).
-
-  If the admin role may not read the setting (not a superuser and no `pg_read_all_settings`),
-  the check is skipped and logged at info level. For postgres_exporter's `pg_stat_statements`
-  metrics, start the server with the library, e.g. in Docker Compose:
-
-  ```yaml
-  postgres:
-    image: postgres:16-alpine
-    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
-  ```
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `POSTGRES_USER` | yes | - | Admin user (or `POSTGRES_USER_FILE`) |
-| `POSTGRES_PASSWORD` | yes | - | Admin password (or `POSTGRES_PASSWORD_FILE`) |
-| `POSTGRES_HOST` | no | `localhost` | PostgreSQL host |
-| `POSTGRES_PORT` | no | `5432` | PostgreSQL port |
-| `POSTGRES_DB` | no | `postgres` | Admin database |
-| `POSTGRES_SSLMODE` | no | `disable` | SSL mode |
-| `PGHELPER_CONFIG_PATH` | no | `./config.yaml` | Path to YAML config |
-| `MIGRATIONS_ENABLED` | no | `true` | Set to `false` to skip all migrations at runtime |
-| `DRY_RUN` | no | `false` | Set to `true` to log every mutation as a preview without applying it |
-| `LOG_LEVEL` | no | `info` | Log level (debug/info/warn/error) |
-
-Every variable above can alternatively be read from a file by setting `<NAME>_FILE` to its
-path (trailing newlines trimmed). Setting both `<NAME>` and `<NAME>_FILE` is an error.
-
-## Strategy
-
-Control whether existing resources are updated or skipped using the `strategy` field:
-
-- `update` (default) — create resources if missing, update if they already exist
-- `create` — create resources if missing, skip if they already exist. For databases,
-  this also skips all sub-resources (settings, `role_settings`, extensions, schemas,
-  grants) if the database already exists.
-
-Strategy can be set globally or per resource. Per-resource strategy overrides the global setting.
-
-```yaml
-strategy: "create"           # global default: skip existing resources
-
-roles:
-  - name: "app_user"
-    strategy: "update"       # override: always reconcile this role
-    password: "${APP_DB_PASSWORD}"
-```
-
-## Environment Variable Expansion
-
-String values support `${VAR}` references, resolved when the config is loaded:
-
-| Syntax | Behavior |
-|---|---|
-| `${VAR}` | Value of `VAR`; falls back to the contents of the file named by `VAR_FILE`. **Fails if neither is set.** |
-| `${VAR:-default}` | Like `${VAR}`, but uses `default` when the variable is unset **or empty** (POSIX/Compose semantics). |
-| `${VAR:-}` | Optional value: empty string when unset or empty. |
-| `$${` | Escape: a literal `${` (not expanded, not validated), e.g. `pa$${ss` → `pa${ss`. |
-
-```yaml
-password: "${APP_DB_PASSWORD}"          # from APP_DB_PASSWORD or the file in APP_DB_PASSWORD_FILE
-name: "${APP_DB_NAME:-myapp}"           # with a default
-```
-
-Rules:
-
-- **Unresolved references fail loading.** Every missing variable is reported in one error,
-  with its config path (e.g. `roles[0].password: environment variable APP_DB_PASSWORD is not set`).
-- **`*_FILE` secrets** (Docker secrets / Kubernetes secret volumes): the file content is used
-  with trailing newlines trimmed (max 64 KiB). Setting both `VAR` and `VAR_FILE` is an error.
-- **Passwords must not resolve to empty.** A `password` containing a reference that expands
-  to `""` fails, since an empty password would silently provision the role without one.
-- Error messages never contain resolved values or file contents, and never quote the raw
-  text of a `password` field.
-- Default values cannot contain `}` or another reference: nested references such as
-  `${A:-${B}}` are rejected with an error.
-
-```yaml
-# docker-compose.yaml
-services:
-  postgres-provisioner:
-    environment:
-      POSTGRES_PASSWORD_FILE: /run/secrets/pg_admin_password
-      APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
-    secrets: [pg_admin_password, app_db_password]
-```
-
-## Provisioning Order
-
-1. **Roles** — created or updated idempotently, then role `settings`
-2. **Role memberships** — `GRANT <group> TO <role>` for each `member_of` entry not yet granted
-3. **Databases** — created idempotently, owner set, then database `settings` and `role_settings`
-4. **Schemas** — `CREATE SCHEMA IF NOT EXISTS` with owner (per-database). Owner defaults to database owner if not specified.
-5. **Extensions** — `CREATE EXTENSION IF NOT EXISTS` (per-database). Runs after schemas, so extensions can be installed into a provisioned schema (see [Extensions](#extensions) for where an extension without `schema` lands).
-6. **Revokes** — `REVOKE` for listed privileges the grantee currently holds (per-database). Runs before grants.
-7. **Grants** — `GRANT` statements are inherently idempotent (per-database). `on_tables_in_schema` also sets `ALTER DEFAULT PRIVILEGES` for future tables.
-8. **Migrations** — Flyway-style SQL files executed per-database (if configured and enabled).
-9. **Object grants** — `on_tables` grants (per-database), after migrations so they can target tables migrations create.
-10. **Publications** — `CREATE PUBLICATION` / additive `ALTER PUBLICATION` (per-database), after migrations.
-
-## Grant Types
-
-Each grant sets exactly one target. Privileges are validated per target when the config is loaded,
-and `ALL` must be the only privilege in its grant:
-
-| Target | Applies to | Allowed privileges |
-|---|---|---|
-| `on_database: true` | the database itself | `CONNECT`, `CREATE`, `TEMPORARY`/`TEMP`, `ALL` |
-| `on_schema: "name"` | the schema | `USAGE`, `CREATE`, `ALL` |
-| `on_tables_in_schema: "name"` | all tables in the schema | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `ALL` |
-| `on_sequences_in_schema: "name"` | all sequences in the schema | `USAGE`, `SELECT`, `UPDATE`, `ALL` |
-| `on_functions_in_schema: "name"` | all functions and procedures in the schema | `EXECUTE`, `ALL` |
-| `on_tables: ["schema.table", ...]` | specific tables (optionally `columns`) | table privileges; with `columns`: `SELECT`, `INSERT`, `UPDATE`, `REFERENCES`, `ALL` |
-
-The `*_in_schema` targets grant on all existing objects and set `ALTER DEFAULT PRIVILEGES`
-for objects created later, both by the provisioning user (e.g. via migrations) and by the
-schema owner (the schema's `owner`, falling back to the database owner). If neither a
-schema owner nor a database owner is configured, only the provisioning user's default
-privileges are set. Objects created by any other role are not covered by the default
-privileges; they get the grant on the next run.
-
-**Tables with `serial` columns** also need sequence privileges, or inserts fail with
-`permission denied for sequence`. Identity columns (`GENERATED ... AS IDENTITY`) don't:
-
-```yaml
-grants:
-  - { role: app, privileges: [USAGE], on_schema: app }
-  - { role: app, privileges: [SELECT, INSERT, UPDATE, DELETE], on_tables_in_schema: app }
-  - { role: app, privileges: [USAGE, SELECT], on_sequences_in_schema: app }
-```
-
-**Specific tables and columns:**
-
-```yaml
-grants:
-  - role: reporting
-    privileges: [SELECT]
-    on_tables: ["app.users", "app.orders"]   # schema-qualified, used verbatim (case-sensitive)
-    columns: ["id", "email"]                 # optional: GRANT SELECT ("id", "email") ON TABLE ...
-```
-
-`on_tables` grants run **after migrations**, so they can target tables created by them in
-the same run. Unlike the `*_in_schema` targets they don't set default privileges.
-What happens to a table that still doesn't exist depends on whether this run ran migrations
-for the database:
-
-| Migrations for the database | Missing table |
-|---|---|
-| configured and enabled | provisioning fails, naming the missing tables (dry-run only logs them, since migrations are only previewed) |
-| disabled (`MIGRATIONS_ENABLED=false`) or not configured | warning naming the missing tables; the grant is applied to the tables that exist, and the next run picks up the rest |
-
-The second case covers applications that run their own migrations, e.g. with the provisioner
-as an init container: on a fresh database the tables don't exist yet, so the grant is
-completed by the next provisioning run after the application created them.
-
-Besides tables (including partitioned tables), `on_tables` accepts **views, materialized
-views and foreign tables**. Other relations such as indexes, sequences or composite types
-are rejected with an error naming their kind (use `on_sequences_in_schema` for sequences).
-
-Table and column names are quoted for you and matched **case-sensitively**: `App.Orders`
-targets `"App"."Orders"`, not `app.orders`. Write them unquoted — names containing `"` are
-rejected at load time. If a table isn't found but exists with different case, the error
-suggests the matching name.
-
-**Functions:** PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so `on_functions_in_schema`
-matters mainly for functions whose `EXECUTE` was revoked from `PUBLIC`.
-
-## Revokes
-
-The provisioner is otherwise additive, but `revokes` explicitly removes privileges —
-typically PostgreSQL's defaults for `PUBLIC` (every role), to harden a database:
-
-```yaml
-databases:
-  - name: "myapp"
-    revokes:
-      - { role: PUBLIC, privileges: [ALL], on_database: true }    # CONNECT + TEMPORARY + CREATE
-      - { role: PUBLIC, privileges: [CREATE], on_schema: public }
-    grants:
-      - { role: app_user, privileges: [CONNECT], on_database: true }
-```
-
-- Same shape as grants. Supported targets: `on_database` and `on_schema`.
-- `role` is a declared role or `PUBLIC` (case-insensitive), the pseudo-role covering every role.
-  New databases grant `CONNECT` and `TEMPORARY` to `PUBLIC` by default. Because any case means
-  the pseudo-role, declaring a role named `public` in any case (PostgreSQL allows quoted
-  `"PUBLIC"` or `"Public"`) is a config error.
-- Revokes run **before** grants, so revoking from `PUBLIC` and granting to specific roles converges.
-- Only privileges the grantee currently holds are revoked; otherwise the revoke is logged as
-  already applied and skipped.
-- A privilege both granted and revoked for the same role and object is a config error, as
-  are duplicate revokes.
-- `REVOKE` only removes grants made by a specific grantor. As a superuser, the provisioner
-  revokes as the object owner, removing the owner's grants (including the defaults). A
-  non-superuser revokes as itself (or as the owner, if it is a member of the owning role) and
-  removes only those grants; for others, PostgreSQL only emits a server `WARNING`, not an
-  error. Either way, if a privilege survives because another grantor granted it, the
-  provisioner logs a warning.
-- Revoking from a role only removes privileges granted to that role directly. The role still
-  has whatever it gets through `PUBLIC` or through membership in other roles: revoke from
-  `PUBLIC` (or from those roles) as well.
-- Revokes never use `CASCADE`. If the grantee holds a privilege `WITH GRANT OPTION` and has
-  granted it on to other roles, PostgreSQL rejects the `REVOKE` with "dependent privileges
-  exist" and the run fails with a hint. Revoke the dependent grants first (or run
-  `REVOKE ... CASCADE` manually if removing them is intended).
-- In dry-run, a revoke on a schema created in the same run is previewed against a new
-  schema's defaults: only its owner holds privileges, so revoking from `PUBLIC` would do nothing.
-- With `strategy: create`, revokes (like other per-database resources) only apply to newly
-  created databases. Use `strategy: update` to harden an existing database.
-
-## Publications
-
-Logical replication publications, e.g. as the source for CDC with Debezium or Redpanda Connect:
-
-```yaml
-databases:
-  - name: "myapp"
-    publications:
-      - name: "cdc"
-        tables: ["app.orders", "billing.invoices"]   # schema-qualified
-        publish: ["insert", "update", "delete"]      # optional; default: all incl. truncate
-      - name: "everything"
-        all_tables: true                             # FOR ALL TABLES (requires superuser)
-```
-
-- Provisioned **after migrations** (and `on_tables` grants), so they can publish tables the
-  migrations create. Missing tables are handled like for `on_tables` grants: if this run
-  applied the database's migrations, a table still missing fails provisioning (dry-run only
-  logs it). With migrations disabled or not configured, a warning names the missing tables and
-  the publication is created with, or extended by, the existing ones (creation is skipped if
-  none exist yet); the next run adds the rest.
-- `tables` must be tables or partitioned tables (a partitioned table is published with its
-  partitions). Views, materialized views, foreign tables and other relations are rejected
-  before the publication is created or changed.
-- Existing publications are reconciled **additively**: a changed `publish` list is applied
-  (`ALTER PUBLICATION ... SET (publish = ...)`) and missing tables are added (`ADD TABLE`).
-  Published tables that are no longer configured are **not** dropped — that could silently
-  cut off a consumer — a warning is logged instead. `all_tables` can't be changed on an
-  existing publication (warning). With `strategy: create`, existing publications are left as-is.
-- Prerequisites the provisioner can't set: the server needs `wal_level=logical` (a warning is
-  logged otherwise; requires a restart). Tables published for `update`/`delete` need a primary
-  key or `REPLICA IDENTITY`, or those statements fail on the source.
-- Replication slots are not managed: CDC consumers create their own, and an unused slot
-  retains WAL indefinitely. The CDC user needs `options: { replication: true }` and `SELECT`
-  on the published tables (e.g. via `on_tables` grants).
-
-## Migrations
-
-Flyway-style SQL migrations can be configured per database. Migration files are discovered from a directory and executed in order.
-
-```yaml
-databases:
-  - name: "myapp"
-    owner: "app_user"
-    migrations:
-      directory: "./migrations/myapp"   # supports ${VAR} expansion
-```
-
-**File naming:**
-
-- `V0001__create_users.sql` — **Versioned**: run once, immutable. Checksum is verified on subsequent runs; a mismatch causes an error.
-- `R0001__seed_data.sql` — **Repeatable**: re-run whenever the file content changes.
-
-Migrations are tracked in a `_schema_migrations` table (created automatically) with SHA-256 checksums. Versioned migrations run first (sorted by version), then repeatable migrations.
-
-**Disabling migrations at runtime:**
-
-Migrations can be disabled without changing the config file using the `--migrations=false` CLI flag or `MIGRATIONS_ENABLED=false` environment variable. The CLI flag takes precedence over the env var.
-
-## CLI Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--migrations` | `true` (or `MIGRATIONS_ENABLED` env var) | Enable/disable migrations |
-| `--dry-run` | `false` (or `DRY_RUN` env var) | Log mutations as a preview without executing them. Read-only queries (existence checks, applied-migration lookups) still run so the preview reflects live state. The CLI flag takes precedence over the env var. |
-| `--version` | — | Print version and exit |
-
-## SSL Mode
-
-Set `POSTGRES_SSLMODE` to control connection encryption. Defaults to `disable` for local development. For production, use `require`, `verify-ca`, or `verify-full`. See [PostgreSQL SSL documentation](https://www.postgresql.org/docs/current/libpq-ssl.html).
-
-## Connection Retry
-
-On startup, the tool retries connecting to PostgreSQL with exponential backoff (1s initial, 30s cap, 15 retries, 5min total timeout). This handles Docker Compose startup ordering without requiring `wait-for-it` scripts.
-
-## Development
-
-```bash
-make build            # Build binary
-make test             # Run unit tests
-make test-integration # Run integration tests (requires Docker)
-make lint             # Run golangci-lint
-make vet              # Run go vet
-make docker           # Build Docker image
-```
-
-## Docker Compose Usage
-
-```yaml
 services:
   postgres:
     image: postgres:16-alpine
@@ -532,23 +62,71 @@ services:
       retries: 10
 
   postgres-provisioner:
-    image: ghcr.io/datarocks-ag/postgres-provisioner:latest
+    image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
     depends_on:
       postgres:
         condition: service_healthy
     environment:
+      POSTGRES_HOST: postgres
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: adminpass
-      POSTGRES_HOST: postgres
       PGHELPER_CONFIG_PATH: /config.yaml
-      APP_DB_PASSWORD: appsecret
+      SHOP_APP_PASSWORD: shop-app-secret
     volumes:
       - ./config.yaml:/config.yaml:ro
-      - ./migrations:/migrations:ro
-
-  app:
-    image: your-app
-    depends_on:
-      postgres-provisioner:
-        condition: service_completed_successfully
 ```
+
+```console
+$ docker compose up postgres-provisioner
+...
+{"level":"INFO","msg":"Creating role","role":"shop_app"}
+{"level":"INFO","msg":"Creating database","database":"shop"}
+{"level":"INFO","msg":"postgres-provisioner finished successfully"}
+```
+
+Run it again and nothing is recreated. That's the whole idea. The
+[getting started guide](docs/getting-started.md) takes this example further: schemas,
+migrations, grants, a read-only user, and wiring your application to it.
+
+## Documentation
+
+Read in this order if you're new; jump straight to a how-to if you know what you need.
+
+| | |
+|---|---|
+| **[Getting started](docs/getting-started.md)** | A guided tour: from an empty Postgres to an application database with migrations and a read-only user. |
+| **[How it works](docs/concepts.md)** | The model behind a run: what gets reconciled, what is never touched, the order of steps, `strategy`, dry-run. |
+| **How-to guides** | Task-focused stories: |
+| &nbsp;&nbsp;[Monitor Postgres with postgres_exporter](docs/howto/monitoring.md) | A least-privilege `pg_monitor` account instead of the superuser. |
+| &nbsp;&nbsp;[Read-only and reporting users](docs/howto/read-only-users.md) | Schema-wide, table- and column-level read access. |
+| &nbsp;&nbsp;[Harden a database](docs/howto/harden-database.md) | Revoke PostgreSQL's `PUBLIC` defaults and grant access explicitly. |
+| &nbsp;&nbsp;[Manage secrets](docs/howto/secrets.md) | Docker secrets, Kubernetes secrets, password rotation. |
+| &nbsp;&nbsp;[When the application runs its own migrations](docs/howto/app-migrations.md) | Grants for tables the provisioner doesn't create. |
+| &nbsp;&nbsp;[Change data capture with publications](docs/howto/cdc-publications.md) | Logical replication for Debezium, Redpanda Connect and friends. |
+| **[Deployment](docs/deployment.md)** | Docker Compose, Kubernetes, binaries, environment variables, CLI flags, required privileges. |
+| **[Configuration reference](docs/configuration.md)** | Every field of the YAML file. |
+| **[FAQ](docs/faq.md)** | Questions people ask after their first week. |
+| **[Upgrading to 2.0](docs/upgrading-to-2.0.md)** | Breaking changes and how to migrate from 1.x. |
+| **[Changelog](CHANGELOG.md)** | What changed in each release. |
+
+A complete, commented config lives in [config.example.yaml](config.example.yaml), and
+[docker-compose.yaml](docker-compose.yaml) runs it against a local Postgres.
+
+## Development
+
+```bash
+make build            # Build binary
+make test             # Run unit tests
+make test-integration # Run integration tests (requires Docker)
+make lint             # Run golangci-lint
+make vet              # Run go vet
+make fmt              # Format the code
+make docker           # Build Docker image
+```
+
+The integration tests start PostgreSQL 16 with testcontainers.
+
+**Branches and releases:** work happens on `feature/`, `bugfix/` and `hotfix/` branches merged
+into `develop` through pull requests. A release gets a `release/x.y.z` branch with a
+"Cut CHANGELOG x.y.z" commit, a `vx.y.z` tag (which builds binaries and images), and is merged
+back into `develop`.
