@@ -3393,6 +3393,8 @@ func TestEnsurePublicationCreate(t *testing.T) {
 	expectPublicationMissing(mock, "cdc")
 	expectTableExists(mock, `"app"."orders"`, true)
 	expectTableExists(mock, `"billing"."invoices"`, true)
+	expectRelationKind(mock, `"app"."orders"`, "r")
+	expectRelationKind(mock, `"billing"."invoices"`, "p")
 	mock.ExpectExec(`^CREATE PUBLICATION "cdc" FOR TABLE "app"\."orders", "billing"\."invoices" WITH \(publish = 'insert, update'\)$`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -3435,6 +3437,7 @@ func TestEnsurePublicationAddsMissingTableOnlyAndKeepsExtra(t *testing.T) {
 	// Published: app.orders (configured) and app.legacy (not configured — kept).
 	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"}, [2]string{"app", "legacy"})
 	expectTableExists(mock, `"app"."customers"`, true)
+	expectRelationKind(mock, `"app"."customers"`, "r")
 	mock.ExpectExec(`^ALTER PUBLICATION "cdc" ADD TABLE "app"\."customers"$`).WillReturnResult(sqlmock.NewResult(0, 0))
 
 	var logs strings.Builder
@@ -3545,6 +3548,70 @@ func TestEnsurePublicationCreateStrategySkipsExisting(t *testing.T) {
 	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.more"}}
 	if err := p.ensurePublication(context.Background(), mockDB, pub, "create"); err != nil {
 		t.Fatalf("ensurePublication: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsurePublicationRejectsNonTableRelations(t *testing.T) {
+	tests := []struct {
+		kind, want string
+	}{
+		{"v", "app.target is a view"},
+		{"m", "app.target is a materialized view"},
+		{"f", "app.target is a foreign table"},
+		{"i", "app.target is an index"},
+		{"S", "app.target is a sequence"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+
+			expectPublicationMissing(mock, "cdc")
+			expectTableExists(mock, `"app"."orders"`, true)
+			expectTableExists(mock, `"app"."target"`, true)
+			expectRelationKind(mock, `"app"."orders"`, "r")
+			expectRelationKind(mock, `"app"."target"`, tt.kind)
+			// No CREATE PUBLICATION.
+
+			p := &Provisioner{opts: DefaultOptions()}
+			pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.target"}}
+			err = p.ensurePublication(context.Background(), mockDB, pub, "update")
+			if err == nil || !strings.Contains(err.Error(), tt.want) ||
+				!strings.Contains(err.Error(), "publications support only tables and partitioned tables") {
+				t.Fatalf("expected relation kind error containing %q, got %v", tt.want, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestEnsurePublicationRejectsViewBeforeAltering: a view among the tables to add fails the
+// run before the publish drift is applied, so the publication is left unchanged.
+func TestEnsurePublicationRejectsViewBeforeAltering(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	expectPublication(mock, "cdc", false, allOps, [2]string{"app", "orders"})
+	expectTableExists(mock, `"app"."order_summary"`, true)
+	expectRelationKind(mock, `"app"."order_summary"`, "v")
+	// No ALTER PUBLICATION ... SET (publish = ...) despite the drift.
+
+	p := &Provisioner{opts: DefaultOptions()}
+	pub := config.Publication{Name: "cdc", Tables: []string{"app.orders", "app.order_summary"}, Publish: []string{"insert"}}
+	err = p.ensurePublication(context.Background(), mockDB, pub, "update")
+	if err == nil || !strings.Contains(err.Error(), "app.order_summary is a view") {
+		t.Fatalf("expected view error, got %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

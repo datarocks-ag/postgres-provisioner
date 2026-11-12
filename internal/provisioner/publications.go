@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"postgres-provisioner/internal/config"
@@ -22,6 +23,7 @@ type publicationState struct {
 // a changed publish list is set, missing tables are added, and tables published but
 // not configured are only warned about — dropping them could silently cut off a CDC
 // consumer. FOR ALL TABLES can't be toggled with ALTER PUBLICATION, so a mismatch warns.
+// Tables are validated before anything is changed.
 func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub config.Publication, strategy string) error {
 	state, err := currentPublication(ctx, dbConn, pub.Name)
 	if err != nil {
@@ -52,6 +54,15 @@ func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub
 			"publication", pub.Name, "installed_all_tables", state.allTables, "configured_all_tables", pub.AllTables)
 	}
 
+	reconcileTables := !state.allTables && !pub.AllTables
+	var toAdd []config.QualifiedName
+	if reconcileTables {
+		toAdd = unpublishedTables(pub.Name, tables, state.tables)
+		if err := p.requireTables(ctx, dbConn, toAdd); err != nil {
+			return err
+		}
+	}
+
 	desiredPublish := pub.EffectivePublish()
 	if strings.Join(state.publish, ", ") != strings.Join(desiredPublish, ", ") {
 		slog.Info("Updating publication operations", "publication", pub.Name,
@@ -63,13 +74,22 @@ func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub
 		}
 	}
 
-	if state.allTables || pub.AllTables {
+	if !reconcileTables {
 		return nil
 	}
-	return p.reconcilePublicationTables(ctx, dbConn, pub.Name, tables, state.tables)
+	if len(toAdd) == 0 {
+		slog.Info("Publication tables up to date", "publication", pub.Name)
+		return nil
+	}
+	slog.Info("Adding tables to publication", "publication", pub.Name, "tables", quoteQualifiedNames(toAdd))
+	query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", quoteIdentifier(pub.Name), quoteQualifiedNames(toAdd))
+	_, err = p.execMutation(ctx, dbConn, query)
+	return err
 }
 
-func (p *Provisioner) reconcilePublicationTables(ctx context.Context, dbConn *sql.DB, name string, desired []config.QualifiedName, current map[string]bool) error {
+// unpublishedTables returns the desired tables missing from the publication's current
+// tables, and warns about current tables that aren't configured (they are kept).
+func unpublishedTables(name string, desired []config.QualifiedName, current map[string]bool) []config.QualifiedName {
 	desiredSet := make(map[string]bool, len(desired))
 	var toAdd []config.QualifiedName
 	for _, table := range desired {
@@ -86,30 +106,23 @@ func (p *Provisioner) reconcilePublicationTables(ctx context.Context, dbConn *sq
 		}
 	}
 	if len(extra) > 0 {
+		sort.Strings(extra)
 		slog.Warn("Publication contains tables not in config; leaving them (additive only)",
 			"publication", name, "tables", strings.Join(extra, ", "))
 	}
-
-	if len(toAdd) == 0 {
-		slog.Info("Publication tables up to date", "publication", name)
-		return nil
-	}
-	if err := p.requireTables(ctx, dbConn, toAdd); err != nil {
-		return err
-	}
-	slog.Info("Adding tables to publication", "publication", name, "tables", quoteQualifiedNames(toAdd))
-	query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", quoteIdentifier(name), quoteQualifiedNames(toAdd))
-	_, err := p.execMutation(ctx, dbConn, query)
-	return err
+	return toAdd
 }
 
-// requireTables fails if any table doesn't exist. Publications run after migrations, so
-// missing tables are a config error; in dry-run, where migrations aren't applied, they
-// are only logged.
+// requireTables fails if any table doesn't exist or isn't a table. Publications run after
+// migrations, so missing tables are a config error; in dry-run, where migrations aren't
+// applied, they are only logged.
 func (p *Provisioner) requireTables(ctx context.Context, dbConn *sql.DB, tables []config.QualifiedName) error {
 	missing, err := missingTables(ctx, dbConn, tables)
 	if err != nil {
 		return fmt.Errorf("checking tables: %w", err)
+	}
+	if err := checkPublishableRelationKinds(ctx, dbConn, tables, missing); err != nil {
+		return err
 	}
 	if len(missing) == 0 {
 		return nil
@@ -120,6 +133,45 @@ func (p *Provisioner) requireTables(ctx context.Context, dbConn *sql.DB, tables 
 		return nil
 	}
 	return fmt.Errorf("tables not found: %s", strings.Join(missing, ", "))
+}
+
+// publishableRelationKinds are the relkinds a publication accepts: ordinary and
+// partitioned tables.
+var publishableRelationKinds = map[string]bool{"r": true, "p": true}
+
+// nonTableRelationKindNames names the relkinds on_tables accepts but publications don't.
+var nonTableRelationKindNames = map[string]string{
+	"v": "a view",
+	"m": "a materialized view",
+	"f": "a foreign table",
+}
+
+// checkPublishableRelationKinds fails if any existing table in tables (those not listed in
+// missing) is a relation a publication can't contain, such as a view, so the run stops
+// with a clear message before the publication is changed.
+func checkPublishableRelationKinds(ctx context.Context, dbConn *sql.DB, tables []config.QualifiedName, missing []string) error {
+	var invalid []string
+	for _, table := range existingTables(tables, missing) {
+		kind, err := relationKind(ctx, dbConn, table)
+		if err != nil {
+			return fmt.Errorf("checking tables: %w", err)
+		}
+		if kind == "" || publishableRelationKinds[kind] {
+			continue
+		}
+		label, ok := nonTableRelationKindNames[kind]
+		if !ok {
+			label, ok = relationKindNames[kind]
+		}
+		if !ok {
+			label = fmt.Sprintf("a relation of kind %q", kind)
+		}
+		invalid = append(invalid, fmt.Sprintf("%s is %s", table, label))
+	}
+	if len(invalid) > 0 {
+		return fmt.Errorf("%s (publications support only tables and partitioned tables)", strings.Join(invalid, "; "))
+	}
+	return nil
 }
 
 func createPublicationSQL(pub config.Publication, tables []config.QualifiedName) string {

@@ -447,6 +447,9 @@ databases:
 
 - Provisioned **after migrations** (and `on_tables` grants), so they can publish tables the
   migrations create. A table still missing then fails provisioning (dry-run only logs it).
+- `tables` must be tables or partitioned tables (a partitioned table is published with its
+  partitions). Views, materialized views, foreign tables and other relations are rejected
+  before the publication is created or changed.
 - Existing publications are reconciled **additively**: a changed `publish` list is applied
   (`ALTER PUBLICATION ... SET (publish = ...)`) and missing tables are added (`ADD TABLE`).
   Published tables that are no longer configured are **not** dropped — that could silently
