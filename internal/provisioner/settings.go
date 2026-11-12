@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 
 	"postgres-provisioner/internal/config"
+
+	"github.com/lib/pq"
 )
 
 // settingsScope identifies where settings are stored: role-wide, database-wide, or for a
@@ -82,7 +83,13 @@ func (p *Provisioner) applySettings(ctx context.Context, scope settingsScope, de
 			continue
 		}
 
-		if isSet && settingMatches(stored, value.Values) {
+		matches := false
+		if isSet {
+			if matches, err = p.settingMatches(ctx, stored, value.Values); err != nil {
+				return fmt.Errorf("comparing %s for %s: %w", name, scope.description, err)
+			}
+		}
+		if matches {
 			slog.Info("Setting unchanged, skipping", "scope", scope.description, "setting", name)
 			continue
 		}
@@ -127,25 +134,27 @@ func formatSettingValue(values []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// plainIdentifier matches identifiers PostgreSQL leaves unquoted when it stores list
-// settings such as search_path.
-var plainIdentifier = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+// quotedListQuery renders values the way PostgreSQL stores identifier list settings such
+// as search_path: each element through quote_ident (the quoting the server applies when
+// storing them), joined by ", ".
+const quotedListQuery = `SELECT string_agg(quote_ident(v), ', ' ORDER BY ord)
+	FROM unnest($1::text[]) WITH ORDINALITY AS t(v, ord)`
 
 // settingMatches compares a stored setconfig value with the desired values. PostgreSQL
-// stores lists joined by ", ", and quotes elements of identifier lists (search_path) that
-// aren't plain identifiers, e.g. "$user". Both forms are accepted; a false mismatch only
-// causes a redundant, harmless ALTER.
-func settingMatches(stored string, values []string) bool {
+// stores lists joined by ", " and quotes elements of identifier lists (search_path) that
+// need it, e.g. "$user", "user" (a reserved keyword) or "App". Rather than re-implementing
+// the server's keyword list, PostgreSQL computes the quoted form, and only when the stored
+// value contains a quote. A false mismatch only causes a redundant, harmless ALTER.
+func (p *Provisioner) settingMatches(ctx context.Context, stored string, values []string) (bool, error) {
 	if stored == strings.Join(values, ", ") {
-		return true
+		return true, nil
 	}
-	quoted := make([]string, len(values))
-	for i, v := range values {
-		if plainIdentifier.MatchString(v) {
-			quoted[i] = v
-		} else {
-			quoted[i] = quoteIdentifier(v)
-		}
+	if !strings.Contains(stored, `"`) {
+		return false, nil
 	}
-	return stored == strings.Join(quoted, ", ")
+	var quoted string
+	if err := p.adminDB.QueryRowContext(ctx, quotedListQuery, pq.Array(values)).Scan(&quoted); err != nil {
+		return false, err
+	}
+	return stored == quoted, nil
 }

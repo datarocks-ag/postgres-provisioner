@@ -2693,6 +2693,10 @@ func TestApplySettingsOnlyChangesDifferingValues(t *testing.T) {
 	// search_path and statement_timeout match; only work_mem changes, lock_timeout resets
 	// nothing (not set), and the new jit setting is applied. Names are applied sorted.
 	mock.ExpectExec(`^ALTER ROLE "app" SET jit = 'off'$`).WillReturnResult(sqlmock.NewResult(0, 0))
+	// The stored search_path contains quotes, so PostgreSQL computes the quoted form.
+	mock.ExpectQuery(`SELECT string_agg\(quote_ident\(v\)`).
+		WithArgs(pq.Array([]string{"app", "$user", "public"})).
+		WillReturnRows(sqlmock.NewRows([]string{"string_agg"}).AddRow(`app, "$user", public`))
 	mock.ExpectExec(`^ALTER ROLE "app" SET work_mem = '64MB'$`).WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{adminDB: mockDB}
@@ -2801,6 +2805,7 @@ func TestEnsureRoleCreateStrategySkipsSettings(t *testing.T) {
 }
 
 func TestSettingMatches(t *testing.T) {
+	// Values without quotes in the stored form are compared without a query.
 	tests := []struct {
 		stored string
 		values []string
@@ -2808,13 +2813,48 @@ func TestSettingMatches(t *testing.T) {
 	}{
 		{"30s", []string{"30s"}, true},
 		{"31s", []string{"30s"}, false},
-		{`app, "$user", public`, []string{"app", "$user", "public"}, true},
 		{"app, public", []string{"app", "public"}, true},
 		{"app, public", []string{"public", "app"}, false},
 	}
+	p := &Provisioner{}
 	for _, tt := range tests {
-		if got := settingMatches(tt.stored, tt.values); got != tt.want {
+		got, err := p.settingMatches(context.Background(), tt.stored, tt.values)
+		if err != nil {
+			t.Fatalf("settingMatches(%q, %v): %v", tt.stored, tt.values, err)
+		}
+		if got != tt.want {
 			t.Errorf("settingMatches(%q, %v) = %v, want %v", tt.stored, tt.values, got, tt.want)
 		}
+	}
+}
+
+func TestSettingMatchesQuotedFormComputedByPostgres(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT string_agg\(quote_ident\(v\), ', ' ORDER BY ord\)`).
+		WithArgs(pq.Array([]string{"app", "user"})).
+		WillReturnRows(sqlmock.NewRows([]string{"string_agg"}).AddRow(`app, "user"`))
+	mock.ExpectQuery(`SELECT string_agg\(quote_ident\(v\), ', ' ORDER BY ord\)`).
+		WithArgs(pq.Array([]string{"user", "app"})).
+		WillReturnRows(sqlmock.NewRows([]string{"string_agg"}).AddRow(`"user", app`))
+	mock.ExpectQuery(`SELECT string_agg`).WillReturnError(errors.New("boom"))
+
+	p := &Provisioner{adminDB: mockDB}
+	ctx := context.Background()
+	if got, err := p.settingMatches(ctx, `app, "user"`, []string{"app", "user"}); err != nil || !got {
+		t.Errorf("expected match for quoted reserved keyword, got %v, %v", got, err)
+	}
+	if got, err := p.settingMatches(ctx, `app, "user"`, []string{"user", "app"}); err != nil || got {
+		t.Errorf("expected mismatch for different order, got %v, %v", got, err)
+	}
+	if _, err := p.settingMatches(ctx, `"x"`, []string{"y"}); err == nil {
+		t.Error("expected query error to be returned")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1789,3 +1789,40 @@ roles:
 		t.Errorf("null should reset statement_timeout, got %q", got)
 	}
 }
+
+func TestIntegrationSearchPathWithReservedKeywordIsIdempotent(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// "user" is a reserved keyword and "App" is mixed case: PostgreSQL stores both quoted.
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+    settings:
+      search_path: ["app", "user", "App", "$user"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	want := `app, "user", "App", "$user"`
+	if got := showSettingAs(t, connCfg, "app", "apppass", "postgres", "search_path"); got != want {
+		t.Errorf("SHOW search_path = %q, want %q", got, want)
+	}
+
+	logs := captureLogsDuring(t, run)
+	if strings.Contains(logs, "Applying setting") {
+		t.Errorf("second run should not change search_path, logs:\n%s", logs)
+	}
+}
