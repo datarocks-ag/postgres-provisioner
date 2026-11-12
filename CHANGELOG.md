@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.27** — CI and release binaries are now built with Go 1.27, like the Docker image already was (Go 1.25 is no longer supported upstream). Building from source requires Go 1.26 or later.
+- **Go dependencies updated** — `github.com/testcontainers/testcontainers-go` and `/modules/postgres` 0.44.0 → 0.45.0 (integration tests only; not part of the binary).
+
 ## [2.0.0] - 2026-11-12
 
 This release makes config loading strict and contains breaking changes; see [Upgrading to 2.0](docs/upgrading-to-2.0.md).
