@@ -6,6 +6,12 @@ updates:
       interval: weekly
     commit-message:
       prefix: "deps"
+    groups:
+      # testcontainers-go and its modules are released together and must be bumped
+      # together; separate PRs conflict on go.mod/go.sum.
+      testcontainers:
+        patterns:
+          - "github.com/testcontainers/testcontainers-go*"
 
   - package-ecosystem: github-actions
     directory: /
