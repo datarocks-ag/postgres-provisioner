@@ -23,8 +23,9 @@ type publicationState struct {
 // a changed publish list is set, missing tables are added, and tables published but
 // not configured are only warned about — dropping them could silently cut off a CDC
 // consumer. FOR ALL TABLES can't be toggled with ALTER PUBLICATION, so a mismatch warns.
-// Tables are validated before anything is changed.
-func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub config.Publication, strategy string) error {
+// Tables are validated before anything is changed; migrations decides whether a missing
+// table is an error (see publishableTables).
+func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub config.Publication, strategy string, migrations migrationStatus) error {
 	state, err := currentPublication(ctx, dbConn, pub.Name)
 	if err != nil {
 		return err
@@ -36,8 +37,15 @@ func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub
 	}
 
 	if state == nil {
-		if err := p.requireTables(ctx, dbConn, tables); err != nil {
-			return err
+		if !pub.AllTables {
+			if tables, err = p.publishableTables(ctx, dbConn, pub.Name, tables, migrations); err != nil {
+				return err
+			}
+			if len(tables) == 0 {
+				slog.Warn("Skipping publication: none of its tables exist yet; re-run provisioning once they exist",
+					"publication", pub.Name)
+				return nil
+			}
 		}
 		slog.Info("Creating publication", "publication", pub.Name)
 		_, err := p.execMutation(ctx, dbConn, createPublicationSQL(pub, tables))
@@ -56,9 +64,11 @@ func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub
 
 	reconcileTables := !state.allTables && !pub.AllTables
 	var toAdd []config.QualifiedName
+	upToDate := true
 	if reconcileTables {
 		toAdd = unpublishedTables(pub.Name, tables, state.tables)
-		if err := p.requireTables(ctx, dbConn, toAdd); err != nil {
+		upToDate = len(toAdd) == 0
+		if toAdd, err = p.publishableTables(ctx, dbConn, pub.Name, toAdd, migrations); err != nil {
 			return err
 		}
 	}
@@ -74,12 +84,14 @@ func (p *Provisioner) ensurePublication(ctx context.Context, dbConn *sql.DB, pub
 		}
 	}
 
-	if !reconcileTables {
+	if upToDate {
+		if reconcileTables {
+			slog.Info("Publication tables up to date", "publication", pub.Name)
+		}
 		return nil
 	}
 	if len(toAdd) == 0 {
-		slog.Info("Publication tables up to date", "publication", pub.Name)
-		return nil
+		return nil // all unpublished tables are missing; publishableTables warned
 	}
 	slog.Info("Adding tables to publication", "publication", pub.Name, "tables", quoteQualifiedNames(toAdd))
 	query := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", quoteIdentifier(pub.Name), quoteQualifiedNames(toAdd))
@@ -113,26 +125,43 @@ func unpublishedTables(name string, desired []config.QualifiedName, current map[
 	return toAdd
 }
 
-// requireTables fails if any table doesn't exist or isn't a table. Publications run after
-// migrations, so missing tables are a config error; in dry-run, where migrations aren't
-// applied, they are only logged.
-func (p *Provisioner) requireTables(ctx context.Context, dbConn *sql.DB, tables []config.QualifiedName) error {
+// publishableTables validates tables for a publication and returns the ones to publish.
+// Relations that aren't tables are an error. Missing tables follow the same policy as
+// on_tables grants (see grantOnTables):
+//   - migrationsRan: an error, because this run's migrations should have created them.
+//     In dry-run the migrations were only previewed, so missing tables are logged and
+//     all tables are returned for the preview.
+//   - migrationsDisabled / migrationsNotConfigured: a warning, and only the existing
+//     tables are returned; the next run adds the rest. Failing would deadlock an init
+//     container whose application creates the tables.
+func (p *Provisioner) publishableTables(ctx context.Context, dbConn *sql.DB, publication string, tables []config.QualifiedName, migrations migrationStatus) ([]config.QualifiedName, error) {
 	missing, err := missingTables(ctx, dbConn, tables)
 	if err != nil {
-		return fmt.Errorf("checking tables: %w", err)
+		return nil, fmt.Errorf("checking tables: %w", err)
 	}
 	if err := checkPublishableRelationKinds(ctx, dbConn, tables, missing); err != nil {
-		return err
+		return nil, err
 	}
 	if len(missing) == 0 {
-		return nil
+		return tables, nil
 	}
-	if p.opts.DryRun {
-		slog.Info("[DRY RUN] tables not present yet; they may be created by pending migrations",
-			"tables", strings.Join(missing, ", "))
-		return nil
+	described, err := describeMissingTables(ctx, dbConn, missing)
+	if err != nil {
+		return nil, fmt.Errorf("checking tables: %w", err)
 	}
-	return fmt.Errorf("tables not found: %s", strings.Join(missing, ", "))
+	switch {
+	case migrations == migrationsRan && !p.opts.DryRun:
+		return nil, fmt.Errorf("tables not found: %s (checked after this run's migrations; names are case-sensitive)",
+			described)
+	case migrations == migrationsRan:
+		slog.Info("[DRY RUN] tables not present yet; a real run fails unless pending migrations create them",
+			"tables", described, "publication", publication)
+		return tables, nil
+	default:
+		slog.Warn("Skipping publication tables that don't exist yet; re-run provisioning once they exist",
+			"tables", described, "publication", publication, "reason", missingTablesReason(migrations))
+		return existingTables(tables, missing), nil
+	}
 }
 
 // publishableRelationKinds are the relkinds a publication accepts: ordinary and

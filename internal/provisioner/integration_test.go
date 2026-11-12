@@ -2335,3 +2335,68 @@ databases:
 	}
 }
 
+// TestIntegrationPublicationMissingTablesWithMigrationsDisabled verifies that, with
+// migrations disabled, missing tables only warn: the publication is skipped while none
+// exist, created with the existing ones, and completed by a later run.
+func TestIntegrationPublicationMissingTablesWithMigrationsDisabled(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__unused.sql", `SELECT 1;`)
+	yaml := fmt.Sprintf(`
+databases:
+  - name: "appdb"
+    schemas:
+      - name: "app"
+    migrations:
+      directory: %q
+    publications:
+      - name: "cdc"
+        tables: ["app.orders", "app.customers"]
+`, migrationsDir)
+	opts := provisioner.DefaultOptions()
+	opts.MigrationsEnabled = false
+
+	run := func(step string) string {
+		t.Helper()
+		logs, err := runProvisioning(t, adminDB, connCfg, opts, yaml)
+		if err != nil {
+			t.Fatalf("%s: provisioning failed: %v\nlogs:\n%s", step, err, logs)
+		}
+		return logs
+	}
+
+	logs := run("no tables")
+	if !strings.Contains(logs, "none of its tables exist yet") {
+		t.Errorf("expected skip warning, logs:\n%s", logs)
+	}
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "appdb")
+	ctx := context.Background()
+	var exists bool
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = 'cdc')`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("publication should not be created while none of its tables exist")
+	}
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE app.orders (id int PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	logs = run("orders only")
+	if !strings.Contains(logs, "tables=app.customers") {
+		t.Errorf("expected warning naming app.customers, logs:\n%s", logs)
+	}
+	if got := publishedTables(t, conn, "cdc"); got != "app.orders" {
+		t.Fatalf("cdc tables = %q, want app.orders", got)
+	}
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE app.customers (id int PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	run("both tables")
+	if got := publishedTables(t, conn, "cdc"); got != "app.customers,app.orders" {
+		t.Errorf("cdc tables = %q, want app.customers,app.orders", got)
+	}
+}

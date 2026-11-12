@@ -249,7 +249,7 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		p.warnIfWalLevelNotLogical(ctx, dbConn, database)
 	}
 	for _, pub := range database.Publications {
-		if err := p.ensurePublication(ctx, dbConn, pub, dbStrategy); err != nil {
+		if err := p.ensurePublication(ctx, dbConn, pub, dbStrategy, migrations); err != nil {
 			return fmt.Errorf("provisioning publication %q in database %q: %w", pub.Name, database.Name, err)
 		}
 	}

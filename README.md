@@ -446,7 +446,11 @@ databases:
 ```
 
 - Provisioned **after migrations** (and `on_tables` grants), so they can publish tables the
-  migrations create. A table still missing then fails provisioning (dry-run only logs it).
+  migrations create. Missing tables are handled like for `on_tables` grants: if this run
+  applied the database's migrations, a table still missing fails provisioning (dry-run only
+  logs it). With migrations disabled or not configured, a warning names the missing tables and
+  the publication is created with, or extended by, the existing ones (creation is skipped if
+  none exist yet); the next run adds the rest.
 - `tables` must be tables or partitioned tables (a partitioned table is published with its
   partitions). Views, materialized views, foreign tables and other relations are rejected
   before the publication is created or changed.
