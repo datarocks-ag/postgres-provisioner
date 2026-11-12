@@ -1510,11 +1510,16 @@ databases:
 	}
 }
 
+// TestIntegrationTableGrantMissingTableFails: when this run applied migrations, a table
+// they didn't create is an error, with a hint if it exists in different case.
 func TestIntegrationTableGrantMissingTableFails(t *testing.T) {
 	adminDB, connCfg, cleanup := setupPostgres(t)
 	defer cleanup()
 
-	cfg, err := config.Load(writeTestConfig(t, `
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__users.sql", `CREATE TABLE app.users (id int);`)
+
+	cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
 roles:
   - name: "reporting"
 
@@ -1523,15 +1528,74 @@ databases:
     schemas:
       - name: "app"
     grants:
-      - { role: "reporting", privileges: ["SELECT"], on_tables: ["app.ghost"] }
-`))
+      - { role: "reporting", privileges: ["SELECT"], on_tables: ["app.ghost", "app.Users"] }
+    migrations:
+      directory: %q
+`, migrationsDir)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	err = provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost") {
-		t.Fatalf("expected missing table error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost, app.Users (did you mean app.users?)") {
+		t.Fatalf("expected missing table error with case hint, got: %v", err)
+	}
+}
+
+// TestIntegrationTableGrantMigrationsDisabledSkipsMissingTables covers an init container
+// with MIGRATIONS_ENABLED=false whose application runs the migrations itself: on a fresh
+// database provisioning must succeed (warning only), and a later run, after the app
+// created the tables, applies the grant.
+func TestIntegrationTableGrantMigrationsDisabledSkipsMissingTables(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	migrationsDir := t.TempDir()
+	writeMigrationFile(t, migrationsDir, "V0001__users.sql", `CREATE TABLE app.users (id int);`)
+
+	cfg, err := config.Load(writeTestConfig(t, fmt.Sprintf(`
+roles:
+  - name: "reporting"
+    password: "reportingpass"
+    options: { login: true }
+
+databases:
+  - name: "objgrantsnomig"
+    schemas:
+      - name: "app"
+    grants:
+      - { role: "reporting", privileges: ["USAGE"], on_schema: "app" }
+      - { role: "reporting", privileges: ["SELECT"], on_tables: ["app.users"] }
+    migrations:
+      directory: %q
+`, migrationsDir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := provisioner.DefaultOptions()
+	opts.MigrationsEnabled = false
+	ctx := context.Background()
+	if err := provisioner.New(adminDB, connCfg, cfg, opts).Run(ctx); err != nil {
+		t.Fatalf("first run on fresh database: %v", err)
+	}
+
+	// The application runs its migrations.
+	ownerDB := connectAs(t, connCfg, connCfg.User, connCfg.Password, "objgrantsnomig")
+	if _, err := ownerDB.ExecContext(ctx, `CREATE TABLE app.users (id int)`); err != nil {
+		t.Fatal(err)
+	}
+	reportingDB := connectAs(t, connCfg, "reporting", "reportingpass", "objgrantsnomig")
+	var count int
+	if err := reportingDB.QueryRowContext(ctx, `SELECT count(*) FROM app.users`).Scan(&count); err == nil {
+		t.Fatal("expected permission denied before the second run")
+	}
+
+	if err := provisioner.New(adminDB, connCfg, cfg, opts).Run(ctx); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if err := reportingDB.QueryRowContext(ctx, `SELECT count(*) FROM app.users`).Scan(&count); err != nil {
+		t.Errorf("SELECT after second run: %v", err)
 	}
 }
 

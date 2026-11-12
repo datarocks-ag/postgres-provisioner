@@ -2330,8 +2330,8 @@ func TestGrantOnTablesWithColumns(t *testing.T) {
 		OnTables:   []string{"app.users", "App.Orders"},
 		Columns:    []string{"id", "email"},
 	}
-	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant); err != nil {
-		t.Fatalf("applyGrant: %v", err)
+	if err := p.grantOnTables(context.Background(), mockDB, grant, migrationsRan); err != nil {
+		t.Fatalf("grantOnTables: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -2353,8 +2353,8 @@ func TestGrantOnTablesWithoutColumns(t *testing.T) {
 
 	p := &Provisioner{}
 	grant := config.Grant{Role: "app", Privileges: []string{"SELECT", "INSERT"}, OnTables: []string{"app.users"}}
-	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant); err != nil {
-		t.Fatalf("applyGrant: %v", err)
+	if err := p.grantOnTables(context.Background(), mockDB, grant, migrationsRan); err != nil {
+		t.Fatalf("grantOnTables: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -2375,8 +2375,8 @@ func TestGrantOnTablesMissingTableFails(t *testing.T) {
 
 	p := &Provisioner{}
 	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.ghost"}}
-	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
-	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost (on_tables") ||
+	err = p.grantOnTables(context.Background(), mockDB, grant, migrationsRan)
+	if err == nil || !strings.Contains(err.Error(), "tables not found: app.ghost (checked after this run's migrations") ||
 		!strings.Contains(err.Error(), "names are case-sensitive") {
 		t.Fatalf("expected missing table error, got %v", err)
 	}
@@ -2403,7 +2403,7 @@ func TestGrantOnTablesRejectsUnsupportedRelationKinds(t *testing.T) {
 
 	p := &Provisioner{}
 	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users_pkey", "app.point", "app.users"}}
-	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
+	err = p.grantOnTables(context.Background(), mockDB, grant, migrationsRan)
 	want := "app.users_pkey is an index; app.point is a composite type (on_tables supports tables, partitioned tables, views, materialized views and foreign tables)"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected error containing %q, got %v", want, err)
@@ -2427,7 +2427,7 @@ func TestGrantOnTablesMissingTableHintsCaseInsensitiveMatch(t *testing.T) {
 
 	p := &Provisioner{}
 	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.Users"}}
-	err = p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant)
+	err = p.grantOnTables(context.Background(), mockDB, grant, migrationsRan)
 	if err == nil || !strings.Contains(err.Error(), "tables not found: app.Users (did you mean app.users?)") {
 		t.Fatalf("expected missing table error with hint, got %v", err)
 	}
@@ -2451,8 +2451,114 @@ func TestDryRunObjectGrantMissingTableDoesNotFail(t *testing.T) {
 
 	p := &Provisioner{opts: dryRunOptions()}
 	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.future"}}
-	if err := p.applyGrant(context.Background(), mockDB, config.Database{Name: "mydb"}, grant); err != nil {
-		t.Fatalf("applyGrant: %v", err)
+	if err := p.grantOnTables(context.Background(), mockDB, grant, migrationsRan); err != nil {
+		t.Fatalf("grantOnTables: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGrantOnTablesSkipsMissingTablesWhenMigrationsDidNotRun: without migrations in this
+// run (disabled, or none configured) a missing table only warns; the grant covers the
+// tables that exist.
+func TestGrantOnTablesSkipsMissingTablesWhenMigrationsDidNotRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		migrations migrationStatus
+		wantReason string
+	}{
+		{"migrations disabled", migrationsDisabled, "migrations are disabled (MIGRATIONS_ENABLED=false"},
+		{"no migrations configured", migrationsNotConfigured, "no migrations are configured for this database"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mockDB.Close()
+			logs := captureLogs(t)
+
+			mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+				WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow("app.users"))
+			mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."orders"`).
+				WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+			expectRelationKind(mock, `"app"."users"`, "r")
+			mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "orders").
+				WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
+			mock.ExpectExec(`^GRANT SELECT ON TABLE "app"\."users" TO "app"$`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+			p := &Provisioner{opts: DefaultOptions()}
+			grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users", "app.orders"}}
+			if err := p.grantOnTables(context.Background(), mockDB, grant, tt.migrations); err != nil {
+				t.Fatalf("grantOnTables: %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			out := logs.String()
+			if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "tables=app.orders") ||
+				!strings.Contains(out, tt.wantReason) {
+				t.Errorf("expected warning naming app.orders with reason %q, got:\n%s", tt.wantReason, out)
+			}
+			if strings.Contains(out, "pending migrations") {
+				t.Errorf("warning must not mention pending migrations:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestGrantOnTablesAllMissingWithoutMigrationsSkipsGrant(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "users").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
+	// No GRANT: there is no existing table to grant on.
+
+	p := &Provisioner{opts: DefaultOptions()}
+	grant := config.Grant{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users"}}
+	if err := p.grantOnTables(context.Background(), mockDB, grant, migrationsDisabled); err != nil {
+		t.Fatalf("grantOnTables: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestProvisionDatabaseResourcesMigrationsDisabledToleratesMissingTables is the
+// init-container case: the app runs its own migrations, so on a fresh database the
+// on_tables grant must not fail provisioning.
+func TestProvisionDatabaseResourcesMigrationsDisabledToleratesMissingTables(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	database := config.Database{
+		Name:       "mydb",
+		Grants:     []config.Grant{{Role: "app", Privileges: []string{"SELECT"}, OnTables: []string{"app.users"}}},
+		Migrations: &config.Migrations{Directory: t.TempDir()},
+	}
+
+	// No migration queries: migrations are disabled.
+	mock.ExpectQuery(toRegclassQuery).WithArgs(`"app"."users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"to_regclass"}).AddRow(nil))
+	mock.ExpectQuery(caseInsensitiveMatchSQL).WithArgs("app", "users").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}))
+
+	opts := DefaultOptions()
+	opts.MigrationsEnabled = false
+	p := &Provisioner{opts: opts}
+	if err := p.provisionDatabaseResources(context.Background(), mockDB, database, "update"); err != nil {
+		t.Fatalf("provisionDatabaseResources: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

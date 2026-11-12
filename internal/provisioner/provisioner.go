@@ -201,7 +201,8 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 	}
 
 	// 8. Migrations
-	if err := p.migrateDatabase(ctx, dbConn, database); err != nil {
+	migrations, err := p.migrateDatabase(ctx, dbConn, database)
+	if err != nil {
 		return err
 	}
 
@@ -210,7 +211,7 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 		if !grant.IsObjectGrant() {
 			continue
 		}
-		if err := p.applyGrant(ctx, dbConn, database, grant); err != nil {
+		if err := p.grantOnTables(ctx, dbConn, grant, migrations); err != nil {
 			return fmt.Errorf("applying grant for role %q in database %q: %w", grant.Role, database.Name, err)
 		}
 	}
@@ -218,19 +219,20 @@ func (p *Provisioner) provisionDatabaseResources(ctx context.Context, dbConn *sq
 	return nil
 }
 
-// migrateDatabase runs the database's migrations if configured and enabled.
-func (p *Provisioner) migrateDatabase(ctx context.Context, dbConn *sql.DB, database config.Database) error {
+// migrateDatabase runs the database's migrations if configured and enabled, and reports
+// which of those applied.
+func (p *Provisioner) migrateDatabase(ctx context.Context, dbConn *sql.DB, database config.Database) (migrationStatus, error) {
 	if database.Migrations == nil || database.Migrations.Directory == "" {
-		return nil
+		return migrationsNotConfigured, nil
 	}
 	if !p.opts.MigrationsEnabled {
 		slog.Info("Migrations disabled, skipping", "database", database.Name)
-		return nil
+		return migrationsDisabled, nil
 	}
 	if err := p.runMigrations(ctx, dbConn, database.Name, *database.Migrations); err != nil {
-		return fmt.Errorf("running migrations for database %q: %w", database.Name, err)
+		return migrationsRan, fmt.Errorf("running migrations for database %q: %w", database.Name, err)
 	}
-	return nil
+	return migrationsRan, nil
 }
 
 // quoteIdentifier quotes a PostgreSQL identifier to prevent SQL injection.

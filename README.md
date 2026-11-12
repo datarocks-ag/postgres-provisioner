@@ -253,9 +253,18 @@ grants:
 ```
 
 `on_tables` grants run **after migrations**, so they can target tables created by them in
-the same run. A table that still doesn't exist by then fails provisioning with the missing
-table names (in dry-run it's only logged, since migrations aren't applied). Unlike the
-`*_in_schema` targets they don't set default privileges.
+the same run. Unlike the `*_in_schema` targets they don't set default privileges.
+What happens to a table that still doesn't exist depends on whether this run ran migrations
+for the database:
+
+| Migrations for the database | Missing table |
+|---|---|
+| configured and enabled | provisioning fails, naming the missing tables (dry-run only logs them, since migrations are only previewed) |
+| disabled (`MIGRATIONS_ENABLED=false`) or not configured | warning naming the missing tables; the grant is applied to the tables that exist, and the next run picks up the rest |
+
+The second case covers applications that run their own migrations, e.g. with the provisioner
+as an init container: on a fresh database the tables don't exist yet, so the grant is
+completed by the next provisioning run after the application created them.
 
 Besides tables (including partitioned tables), `on_tables` accepts **views, materialized
 views and foreign tables**. Other relations such as indexes, sequences or composite types

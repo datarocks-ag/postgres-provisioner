@@ -16,7 +16,9 @@ func (p *Provisioner) applyGrant(ctx context.Context, dbConn *sql.DB, database c
 
 	switch {
 	case grant.IsObjectGrant():
-		return p.grantOnTables(ctx, dbConn, grant)
+		// on_tables grants depend on the migration outcome; provisionDatabaseResources
+		// applies them after migrations via grantOnTables.
+		return fmt.Errorf("on_tables grants must be applied after migrations")
 	case grant.OnDatabase:
 		return p.grantOnDatabase(ctx, dbConn, database.Name, privs, role)
 	case grant.OnSchema != "":

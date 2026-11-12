@@ -11,11 +11,31 @@ import (
 	"postgres-provisioner/internal/config"
 )
 
+// migrationStatus records what migrateDatabase did for a database in this run. Object
+// grants use it to decide whether a missing table is an error or expected.
+type migrationStatus int
+
+const (
+	// migrationsNotConfigured: the database has no migrations directory.
+	migrationsNotConfigured migrationStatus = iota
+	// migrationsDisabled: migrations are configured but disabled (MIGRATIONS_ENABLED=false),
+	// typically because the application runs them itself.
+	migrationsDisabled
+	// migrationsRan: this run applied the migrations (in dry-run: previewed them).
+	migrationsRan
+)
+
 // grantOnTables grants privileges on specific tables, optionally restricted to columns.
-// It runs after migrations; a table that still doesn't exist is an error, because
-// silently skipping it would only surface later as "permission denied" in the app.
-// In dry-run, migrations aren't applied, so missing tables are only logged.
-func (p *Provisioner) grantOnTables(ctx context.Context, dbConn *sql.DB, grant config.Grant) error {
+// It runs after migrations. What happens to tables that don't exist depends on migrations:
+//   - migrationsRan: an error, because the migrations this run applied should have created
+//     them, and silently skipping would only surface later as "permission denied" in the
+//     app. In dry-run the migrations were only previewed, so missing tables are logged and
+//     the full GRANT is previewed.
+//   - migrationsDisabled / migrationsNotConfigured: a warning. Something else (e.g. the
+//     application) creates the tables, possibly after this provisioner ran as an init
+//     container; failing would deadlock that startup. The grant covers the existing tables
+//     and the missing ones are picked up by the next run.
+func (p *Provisioner) grantOnTables(ctx context.Context, dbConn *sql.DB, grant config.Grant, migrations migrationStatus) error {
 	tables := make([]config.QualifiedName, 0, len(grant.OnTables))
 	for _, raw := range grant.OnTables {
 		table, err := config.ParseQualifiedName(raw)
@@ -37,20 +57,53 @@ func (p *Provisioner) grantOnTables(ctx context.Context, dbConn *sql.DB, grant c
 		if err != nil {
 			return fmt.Errorf("checking tables: %w", err)
 		}
-		if !p.opts.DryRun {
-			return fmt.Errorf("tables not found: %s (on_tables grants run after migrations; the tables must exist by then, and names are case-sensitive)",
+		switch {
+		case migrations == migrationsRan && !p.opts.DryRun:
+			return fmt.Errorf("tables not found: %s (checked after this run's migrations; names are case-sensitive)",
 				described)
+		case migrations == migrationsRan:
+			slog.Info("[DRY RUN] tables not present yet; a real run fails unless pending migrations create them",
+				"tables", described, "role", grant.Role)
+		default:
+			slog.Warn("Skipping on_tables grant for tables that don't exist yet; re-run provisioning once they exist",
+				"tables", described, "role", grant.Role, "reason", missingTablesReason(migrations))
+			tables = existingTables(tables, missing)
+			if len(tables) == 0 {
+				return nil
+			}
 		}
-		slog.Info("[DRY RUN] tables not present yet; they may be created by pending migrations",
-			"tables", described)
 	}
 
-	slog.Info("Granting on tables", "tables", strings.Join(grant.OnTables, ", "),
+	quoted := quoteQualifiedNames(tables)
+	slog.Info("Granting on tables", "tables", quoted,
 		"privileges", strings.Join(grant.Privileges, ", "), "columns", strings.Join(grant.Columns, ", "))
 	query := fmt.Sprintf("GRANT %s ON TABLE %s TO %s",
-		privilegeList(grant.Privileges, grant.Columns), quoteQualifiedNames(tables), quoteIdentifier(grant.Role))
+		privilegeList(grant.Privileges, grant.Columns), quoted, quoteIdentifier(grant.Role))
 	_, err = p.execMutation(ctx, dbConn, query)
 	return err
+}
+
+// missingTablesReason explains, for the warning, why missing tables are tolerated.
+func missingTablesReason(migrations migrationStatus) string {
+	if migrations == migrationsDisabled {
+		return "migrations are disabled (MIGRATIONS_ENABLED=false / --migrations=false), so this run did not create any tables"
+	}
+	return "no migrations are configured for this database, so this run did not create any tables"
+}
+
+// existingTables returns tables without the ones named in missing (as returned by missingTables).
+func existingTables(tables []config.QualifiedName, missing []string) []config.QualifiedName {
+	isMissing := make(map[string]bool, len(missing))
+	for _, m := range missing {
+		isMissing[m] = true
+	}
+	existing := make([]config.QualifiedName, 0, len(tables))
+	for _, t := range tables {
+		if !isMissing[t.String()] {
+			existing = append(existing, t)
+		}
+	}
+	return existing
 }
 
 // privilegeList renders privileges for GRANT. With columns, the column list must follow
@@ -130,15 +183,8 @@ var relationKindNames = map[string]string{
 // checkGrantableRelationKinds fails if any existing table in tables (those not listed in
 // missing) is a relation kind on_tables doesn't support, such as an index.
 func checkGrantableRelationKinds(ctx context.Context, dbConn *sql.DB, tables []config.QualifiedName, missing []string) error {
-	isMissing := make(map[string]bool, len(missing))
-	for _, m := range missing {
-		isMissing[m] = true
-	}
 	var invalid []string
-	for _, table := range tables {
-		if isMissing[table.String()] {
-			continue
-		}
+	for _, table := range existingTables(tables, missing) {
 		kind, err := relationKind(ctx, dbConn, table)
 		if err != nil {
 			return fmt.Errorf("checking tables: %w", err)
