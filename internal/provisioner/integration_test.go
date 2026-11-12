@@ -1862,6 +1862,46 @@ databases:
 	}
 }
 
+func TestIntegrationBooleanAndIntegerSettingsAreIdempotent(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	// Unquoted YAML booleans and integers must round-trip through pg_db_role_setting.
+	cfg, err := config.Load(writeTestConfig(t, `
+roles:
+  - name: "app"
+    password: "apppass"
+    options: { login: true }
+    settings:
+      jit: false
+      work_mem: 65536
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	run := func() {
+		t.Helper()
+		if err := provisioner.New(adminDB, connCfg, cfg, provisioner.DefaultOptions()).Run(ctx); err != nil {
+			t.Fatalf("provisioning run failed: %v", err)
+		}
+	}
+	run()
+
+	want := map[string]string{"jit": "off", "work_mem": "64MB"}
+	for setting, expected := range want {
+		if got := showSettingAs(t, connCfg, "app", "apppass", "postgres", setting); got != expected {
+			t.Errorf("SHOW %s = %q, want %q", setting, got, expected)
+		}
+	}
+
+	logs := captureLogsDuring(t, run)
+	if strings.Contains(logs, "Applying setting") {
+		t.Errorf("second run should not change any setting, logs:\n%s", logs)
+	}
+}
+
 func TestIntegrationSearchPathWithReservedKeywordIsIdempotent(t *testing.T) {
 	adminDB, connCfg, cleanup := setupPostgres(t)
 	defer cleanup()

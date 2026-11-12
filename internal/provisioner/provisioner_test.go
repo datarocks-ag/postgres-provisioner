@@ -2858,3 +2858,84 @@ func TestSettingMatchesQuotedFormComputedByPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// databaseWithSettings returns a database with settings and role_settings for Run tests.
+func databaseWithSettings(strategy string) config.Database {
+	return config.Database{
+		Name:         "appdb",
+		Strategy:     strategy,
+		Settings:     config.Settings{"timezone": {Values: []string{"UTC"}}},
+		RoleSettings: map[string]config.Settings{"app": {"work_mem": {Values: []string{"8MB"}}}},
+	}
+}
+
+func TestRunCreateStrategySkipsSettingsForExistingDatabase(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("appdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	// No settings queries or ALTERs: database settings and role_settings follow the
+	// database's strategy=create. sqlmock fails Run on any unexpected query.
+
+	cfg := &config.Config{Databases: []config.Database{databaseWithSettings("create")}}
+	if err := New(mockDB, db.ConnConfig{}, cfg, DefaultOptions()).Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunPreviewsSettingsForDatabaseToBeCreated(t *testing.T) {
+	mockDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockDB.Close()
+
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_database WHERE datname = \$1\)`).
+		WithArgs("appdb").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(`SELECT unnest\(s.setconfig\)`).WithArgs("appdb").WillReturnRows(settingRows())
+	mock.ExpectQuery(`SELECT unnest\(s.setconfig\)`).WithArgs("app", "appdb").WillReturnRows(settingRows())
+	// No execs and no connection to the database that doesn't exist yet.
+
+	var captured []string
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == "sql" {
+				captured = append(captured, a.Value.String())
+			}
+			return a
+		},
+	})))
+
+	cfg := &config.Config{Databases: []config.Database{databaseWithSettings("update")}}
+	if err := New(mockDB, db.ConnConfig{}, cfg, dryRunOptions()).Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`CREATE DATABASE "appdb"`,
+		`ALTER DATABASE "appdb" SET timezone = 'UTC'`,
+		`ALTER ROLE "app" IN DATABASE "appdb" SET work_mem = '8MB'`,
+	}
+	if len(captured) != len(want) {
+		t.Fatalf("captured SQL = %q, want %q", captured, want)
+	}
+	for i := range want {
+		if !strings.HasPrefix(captured[i], want[i]) {
+			t.Errorf("captured[%d] = %q, want prefix %q", i, captured[i], want[i])
+		}
+	}
+}
