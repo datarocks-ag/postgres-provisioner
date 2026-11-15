@@ -107,11 +107,11 @@ Further reading: [What "update" means for each resource](concepts.md#what-update
 Dry-run lists what a run **executes**, and some statements are executed on every run because
 PostgreSQL treats them as no-ops when nothing changes.
 
-These appear in every preview: `ALTER ROLE` (attributes and passwords), `ALTER … OWNER TO`,
+These appear in every preview: `ALTER ROLE` for a role with a `password`, `ALTER … OWNER TO`,
 `CREATE SCHEMA IF NOT EXISTS`, `GRANT`, and, for each database with migrations, the line
-`[DRY RUN] would create migration tracking table if missing`. Settings, memberships,
-revokes, extensions, migrations and publications are compared first and only show up when
-they differ.
+`[DRY RUN] would create migration tracking table if missing`. Role attributes, settings,
+memberships, revokes, extensions, migrations and publications are compared first and only
+show up when they differ.
 
 Further reading: [Dry-run](concepts.md#dry-run)
 
@@ -331,8 +331,9 @@ Further reading: [Logs and secrets](concepts.md#logs-and-secrets)
 
 Set `options.valid_until` on the role; after that time its password no longer works.
 
-`valid_until` only limits password logins. With `strategy: update` it is applied on every
-run, so changing the date in the config and re-running extends or shortens it. Removing the
+`valid_until` only limits password logins. With `strategy: update` it is applied whenever it
+differs from the stored date, so changing the date in the config and re-running extends or
+shortens it. Removing the
 field leaves the last date in place. `connection_limit` caps parallel sessions as well:
 
 ```yaml

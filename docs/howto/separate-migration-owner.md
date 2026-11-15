@@ -118,11 +118,10 @@ trimmed to it) is the one that covers the migration tool's tables:
 
 ## Pitfalls
 
-- **`strategy: create` leaves the schema with the admin user.** With `create`, the
-  provisioner creates the schema but never runs `ALTER SCHEMA ... OWNER TO`, even in a new
-  database, so `orders_owner` cannot create tables there. Use `strategy: update` for this
-  database, or run `ALTER SCHEMA "app" OWNER TO "orders_owner"` once by hand. See
-  [Strategy](../concepts.md#strategy-update-or-create).
+- **`strategy: create` never changes an existing database.** The schema owner is set when
+  the provisioner creates the database. If the database already existed, nothing inside it
+  is touched, so run `ALTER SCHEMA "app" OWNER TO "orders_owner"` once by hand or use
+  `strategy: update`. See [Strategy](../concepts.md#strategy-update-or-create).
 - **A third role creates tables.** Default privileges only cover the admin user and the
   schema owner. Tables created by any other role are granted on the next provisioning run.
 - **`permission denied for sequence orders_id_seq`:** `orders_app` inserts into a `serial` column without

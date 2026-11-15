@@ -69,6 +69,7 @@ func TestEnsureRoleAlter(t *testing.T) {
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
 		WithArgs("existing").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	expectRoleAttributes(mock, "existing")
 
 	mock.ExpectExec(`ALTER ROLE "existing" WITH PASSWORD 'newpass'`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -254,18 +255,19 @@ func TestEnsureSchema(t *testing.T) {
 	}
 }
 
-func TestEnsureSchemaCreateStrategySkipsOwner(t *testing.T) {
+// Under strategy=create, schemas are only provisioned in a database created in the same
+// run, so the configured owner is applied as it is under update.
+func TestEnsureSchemaCreateStrategySetsOwner(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mockDB.Close()
 
-	// CREATE SCHEMA always runs
 	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	// No ALTER SCHEMA OWNER expected — strategy=create skips owner update
+	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "appuser"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{}
 	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "create"); err != nil {
@@ -478,6 +480,7 @@ func TestAlterRoleNoChanges(t *testing.T) {
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
 		WithArgs("existing").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	expectRoleAttributes(mock, "existing")
 
 	// No ALTER expected — alterRole returns early with "no changes"
 
@@ -1254,6 +1257,7 @@ func TestEnsureRoleAlterWithOptions(t *testing.T) {
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
 		WithArgs("existing").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	expectRoleAttributes(mock, "existing")
 
 	mock.ExpectExec(`ALTER ROLE "existing" WITH SUPERUSER`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -1483,6 +1487,7 @@ func TestDryRunRoleAlter(t *testing.T) {
 	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM pg_roles WHERE rolname = \$1\)`).
 		WithArgs("alice").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	expectRoleAttributes(mock, "alice")
 	// ALTER ROLE must NOT be executed in dry-run mode
 
 	role := config.Role{Name: "alice", Password: "rotated"}
@@ -3791,4 +3796,15 @@ func TestEnsurePublicationRejectsViewBeforeAltering(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// expectRoleAttributes expects alterRole's read of the role's stored attributes and returns
+// those of a role created with defaults (NOLOGIN, INHERIT, no limit, no expiry).
+func expectRoleAttributes(mock sqlmock.Sqlmock, name string) {
+	mock.ExpectQuery(`SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication`).
+		WithArgs(name, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"rolcanlogin", "rolsuper", "rolcreatedb", "rolcreaterole", "rolinherit",
+			"rolreplication", "rolbypassrls", "rolconnlimit", "valid_until_matches",
+		}).AddRow(false, false, false, false, true, false, false, -1, true))
 }

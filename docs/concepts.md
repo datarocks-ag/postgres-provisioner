@@ -65,7 +65,7 @@ With the default `strategy: update`, existing resources are reconciled like this
 
 | Resource | On every run |
 |---|---|
-| Role | `ALTER ROLE` with the configured password and options. Options you don't set are left unchanged. Without a `password`, the existing password is kept. |
+| Role | `ALTER ROLE` with the configured password and the options whose stored value differs. Options you don't set are left unchanged. Without a `password`, the existing password is kept. |
 | Role settings, database settings, `role_settings` | Compared with `pg_db_role_setting`. Only differing values are changed. |
 | Membership | Granted if missing. |
 | Database | Owner set to `owner`. Create-time `options` (encoding, locale, template) can't change and only produce a warning. |
@@ -102,7 +102,8 @@ roles:
 
 A database's strategy covers **everything inside it**. With `strategy: create`, an existing
 database is skipped entirely: its settings, schemas, extensions, revokes, grants, migrations
-and publications. For an existing role, `create` also skips its `settings` and memberships.
+and publications. A database created in the same run is provisioned in full, schema owners
+included. For an existing role, `create` also skips its `settings` and memberships.
 
 ## Dry-run
 
@@ -117,10 +118,10 @@ Read queries still run (does the role exist, which migrations are applied, which
 are held), so the preview reflects the real state. Keep in mind:
 
 - **It previews what will be executed, not a minimal diff.** Statements that PostgreSQL treats
-  as idempotent (`ALTER ROLE` with password and options, `ALTER … OWNER TO`, `GRANT`) are
-  issued on every update run and therefore appear in every preview. Settings, memberships,
-  revokes, extensions, migrations and publications are compared first and only appear when
-  something differs.
+  as idempotent (`ALTER ROLE` with a password, `ALTER … OWNER TO`, `GRANT`) are issued on
+  every update run and therefore appear in every preview. Role attributes, settings,
+  memberships, revokes, extensions, migrations and publications are compared first and only
+  appear when something differs.
 - **A new database can't be looked into.** If the database doesn't exist yet, the preview
   logs a summary (how many schemas, grants, migrations… it would provision) instead of
   connecting to it.
