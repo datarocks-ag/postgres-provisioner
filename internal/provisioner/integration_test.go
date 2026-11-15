@@ -1457,6 +1457,47 @@ databases:
 	}
 }
 
+// TestIntegrationCreateStrategySetsSchemaOwnerInNewDatabase verifies that strategy=create
+// applies the configured schema owner when the database is created in the same run. Under
+// create, schemas are only provisioned in newly created databases, so there is no existing
+// owner to protect.
+func TestIntegrationCreateStrategySetsSchemaOwnerInNewDatabase(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	_, err := runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(), `
+strategy: create
+roles:
+  - name: "shop_app"
+    options: { login: true }
+  - name: "shop_owner"
+    options: { login: true }
+databases:
+  - name: "shop"
+    owner: "shop_app"
+    schemas:
+      - name: "app"
+        owner: "shop_owner"
+      - name: "reporting"
+`)
+	if err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
+
+	conn := connectAs(t, connCfg, connCfg.User, connCfg.Password, "shop")
+	for schema, want := range map[string]string{"app": "shop_owner", "reporting": "shop_app"} {
+		var owner string
+		if err := conn.QueryRow(
+			`SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = $1`, schema,
+		).Scan(&owner); err != nil {
+			t.Fatalf("schema %s: %v", schema, err)
+		}
+		if owner != want {
+			t.Errorf("schema %s: owner = %q, want %q", schema, owner, want)
+		}
+	}
+}
+
 // TestIntegrationTableAndColumnGrantsAfterMigrations provisions a fresh database whose
 // tables are created by a migration in the same run, then grants on specific tables and
 // columns, including case-sensitive quoted identifiers.

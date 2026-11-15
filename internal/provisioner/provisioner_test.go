@@ -254,18 +254,19 @@ func TestEnsureSchema(t *testing.T) {
 	}
 }
 
-func TestEnsureSchemaCreateStrategySkipsOwner(t *testing.T) {
+// Under strategy=create, schemas are only provisioned in a database created in the same
+// run, so the configured owner is applied as it is under update.
+func TestEnsureSchemaCreateStrategySetsOwner(t *testing.T) {
 	mockDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mockDB.Close()
 
-	// CREATE SCHEMA always runs
 	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "app"`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-
-	// No ALTER SCHEMA OWNER expected — strategy=create skips owner update
+	mock.ExpectExec(`ALTER SCHEMA "app" OWNER TO "appuser"`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	p := &Provisioner{}
 	if err := p.ensureSchema(context.Background(), mockDB, "app", "appuser", "create"); err != nil {

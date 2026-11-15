@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **golangci-lint 2.11.4 → 2.15.0** — 2.11.4 panics while analyzing Go 1.27's standard library on Linux (`buildir: unexpected expr: *ast.KeyValueExpr`). Development tool only; the binary's dependencies are unchanged. The `go-header`/`sloglint` pins from 1.1.0 are no longer needed (`sloglint` moves to 0.12.0).
 - **Documentation reviewed against the code** — the FAQ and the how-to guides were checked claim by claim and corrected: an empty `${VAR:-}` default is rejected for passwords, default privileges cover a schema owner only when one is configured, `pg_stat_statements` must live in the database the exporter connects to (the `postgres` database is reserved), and example configs now declare every role they reference. Every how-to now has a verification step and pitfalls, and the FAQ gained answers on configuration errors, migration naming and checksums, expiring access and dropping roles. New how-tos: connecting over TLS, separating the migration owner from the application role, group roles, and role and database defaults.
 
+### Fixed
+
+- **Schema owner under `strategy: create`** — a schema's `owner` (or the database `owner`) was never applied with `strategy: create`, even in a database created in the same run, so the schema stayed with the admin user. It is now set; an existing database is still skipped entirely.
+
 ## [2.0.0] - 2026-11-12
 
 This release makes config loading strict and contains breaking changes; see [Upgrading to 2.0](docs/upgrading-to-2.0.md).

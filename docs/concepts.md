@@ -102,7 +102,8 @@ roles:
 
 A database's strategy covers **everything inside it**. With `strategy: create`, an existing
 database is skipped entirely: its settings, schemas, extensions, revokes, grants, migrations
-and publications. For an existing role, `create` also skips its `settings` and memberships.
+and publications. A database created in the same run is provisioned in full, schema owners
+included. For an existing role, `create` also skips its `settings` and memberships.
 
 ## Dry-run
 

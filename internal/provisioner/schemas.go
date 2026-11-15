@@ -14,8 +14,9 @@ func (p *Provisioner) ensureSchema(ctx context.Context, dbConn *sql.DB, name, ow
 		return err
 	}
 
-	// Only update owner if strategy is "update"
-	if strategy != "create" && owner != "" {
+	// Applied under both strategies: with strategy=create, schemas are only provisioned in a
+	// database created in this run, so there is no existing owner to protect.
+	if owner != "" {
 		query = "ALTER SCHEMA " + quoteIdentifier(name) + " OWNER TO " + quoteIdentifier(owner)
 		if _, err := p.execMutation(ctx, dbConn, query); err != nil {
 			return err
