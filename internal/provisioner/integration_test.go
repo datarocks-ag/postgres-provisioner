@@ -41,7 +41,7 @@ func setupPostgres(t *testing.T, serverArgs ...string) (*sql.DB, db.ConnConfig, 
 	if len(serverArgs) > 0 {
 		opts = append(opts, testcontainers.WithCmdArgs(serverArgs...))
 	}
-	pgContainer, err := postgres.Run(ctx, "postgres:16-alpine", opts...)
+	pgContainer, err := postgres.Run(ctx, postgresImage(), opts...)
 	if err != nil {
 		t.Fatalf("failed to start postgres container: %v", err)
 	}
@@ -89,6 +89,15 @@ func setupPostgres(t *testing.T, serverArgs ...string) (*sql.DB, db.ConnConfig, 
 	}
 
 	return adminDB, connCfg, cleanup
+}
+
+// postgresImage returns the PostgreSQL image the integration tests run against. CI sets
+// POSTGRES_IMAGE to test every supported major version.
+func postgresImage() string {
+	if image := os.Getenv("POSTGRES_IMAGE"); image != "" {
+		return image
+	}
+	return "postgres:16-alpine"
 }
 
 func writeTestConfig(t *testing.T, yaml string) string {

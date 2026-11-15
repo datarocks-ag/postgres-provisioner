@@ -577,8 +577,8 @@ Further reading: [Docker Compose](deployment.md#docker-compose)
 
 ### Which PostgreSQL versions are supported?
 
-PostgreSQL 16 is the version the integration tests run against; other versions aren't
-tested.
+PostgreSQL 16, 17 and 18: CI runs the integration tests against each of them. Older
+versions aren't tested.
 
 Version-specific behavior, such as the membership rules in 16+, is called out in the
 reference.
