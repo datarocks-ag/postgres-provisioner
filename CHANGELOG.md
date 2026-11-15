@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-15
+
+Adds `--validate` and a lock that keeps runs from overlapping, warns about unencrypted connections and misnamed migration files, and fixes schema owners under `strategy: create` and role attributes that a non-superuser admin could not re-apply. No breaking changes.
+
 ### Added
 
 - **`--validate`** — validates the config and every migrations directory (naming, empty files, duplicate versions), then exits with `0` or `1` without connecting. Needs no `POSTGRES_*` variables, so it can run in CI before a deploy. With `--migrations=false`, migration directories aren't checked.
@@ -117,7 +121,8 @@ This release makes config loading strict and contains breaking changes; see [Upg
 
 Initial release.
 
-[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/datarocks-ag/postgres-provisioner/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/datarocks-ag/postgres-provisioner/compare/v1.2.0...v1.3.0

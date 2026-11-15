@@ -588,7 +588,7 @@ Further reading: [integration tests](../internal/provisioner/integration_test.go
 
 ### Which image tag should I use?
 
-A pinned release (`2.0.0`) or minor version (`2.0`).
+A pinned release (`2.1.0`) or minor version (`2.1`).
 
 `latest` follows releases, `develop` the development branch.
 
