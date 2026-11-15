@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"postgres-provisioner/internal/config"
@@ -294,6 +295,31 @@ func TestDiscoverMigrationsSkipsDirectories(t *testing.T) {
 	}
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+}
+
+// A .sql file whose name doesn't match the pattern is never applied; the warning is what
+// tells the user why (e.g. a single underscore after the version).
+func TestDiscoverMigrationsWarnsAboutMisnamedSQLFiles(t *testing.T) {
+	logs := captureLogs(t)
+	dir := t.TempDir()
+	writeFile(t, dir, "V0001__create.sql", "CREATE TABLE t (id int);")
+	writeFile(t, dir, "V0002_add_index.sql", "CREATE INDEX i ON t (id);")
+	writeFile(t, dir, "README.md", "notes")
+
+	files, err := discoverMigrations(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 migration, got %d", len(files))
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "file=V0002_add_index.sql") {
+		t.Errorf("expected a warning naming V0002_add_index.sql, logs:\n%s", out)
+	}
+	if strings.Contains(out, "README.md") {
+		t.Errorf("non-.sql files must not be warned about, logs:\n%s", out)
 	}
 }
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Warning for misnamed migration files** — a `.sql` file in a migrations directory whose name doesn't match `V<n>__<description>.sql` or `R<n>__<description>.sql` (e.g. a single underscore) is still skipped, but now logged as a warning instead of silently.
+
 ### Changed
 
 - **Go 1.27** — CI and release binaries are now built with Go 1.27, like the Docker image already was (Go 1.25 is no longer supported upstream). Building from source requires Go 1.26 or later.

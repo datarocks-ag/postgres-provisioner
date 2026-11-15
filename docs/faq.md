@@ -445,8 +445,9 @@ Further reading: [Connect over TLS](howto/connect-over-tls.md),
 
 ### Why was my migration file ignored?
 
-Because its name doesn't match `V<n>__<description>.sql` or `R<n>__<description>.sql`; other
-files are skipped without a log line.
+Because its name doesn't match `V<n>__<description>.sql` or `R<n>__<description>.sql`. A
+`.sql` file that doesn't match is skipped with a warning; other files are skipped without
+one.
 
 Note the two underscores and the upper-case `V` or `R`: `V1_create.sql` and
 `v1__create.sql` are ignored. Files that do match are checked: an empty file and two files
@@ -457,6 +458,12 @@ migrations/shop/
 ├── V0001__create_products.sql     # applied once
 ├── R0001__product_view.sql        # re-applied when it changes
 └── V0002_add_price.sql            # ignored: one underscore
+```
+
+The skipped file shows up as a warning in the run's log:
+
+```json
+{"level":"WARN","msg":"Ignoring SQL file that doesn't match the migration naming pattern","directory":"/migrations/shop","file":"V0002_add_price.sql","expected":"V<version>__<description>.sql or R<version>__<description>.sql"}
 ```
 
 Further reading: [Migrations](configuration.md#migrations)
