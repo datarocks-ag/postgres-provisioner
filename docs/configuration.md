@@ -353,7 +353,8 @@ See [Harden a database](howto/harden-database.md).
 ```
 
 SQL files in `directory` are applied in order. Files are matched by name; anything else
-(subdirectories, `README.md`, …) is ignored.
+(subdirectories, `README.md`, …) is ignored. A `.sql` file whose name doesn't match the
+pattern below is ignored with a warning.
 
 | Pattern | Kind | Behavior |
 |---|---|---|

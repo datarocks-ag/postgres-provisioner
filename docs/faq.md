@@ -149,43 +149,37 @@ Further reading: [Database options](configuration.md#database-options)
 
 ### Can I validate a config without a database?
 
-Not with a separate command, but the provisioner loads and validates the config before it
-connects, so a run against no server shows whether the config is valid.
+Yes: run with `--validate`. It loads and validates the config, checks every migrations
+directory and its files, and exits with `0` or `1` without connecting to a server.
 
-The admin credentials are read before the config, so `POSTGRES_USER` and
-`POSTGRES_PASSWORD` (or their `_FILE` variants) must be set to any value. Validation stops at
-the first error, except that all unresolved `${VAR}` references are reported together.
-Migration files and the migrations directory are only read during a run, so this check
-doesn't cover them. Run the image without a database; it's safe anywhere, because inside the
-container `localhost:5432` has no server:
+It needs no `POSTGRES_*` variables, only the variables the config itself references.
+Validation stops at the first error, except that all unresolved `${VAR}` references are
+reported together. It is read-only and safe to run anywhere, for example in CI before a
+deploy:
 
 ```console
 $ docker run --rm \
-    -e POSTGRES_USER=check -e POSTGRES_PASSWORD=check \
     -e PGHELPER_CONFIG_PATH=/config.yaml \
     -v "$PWD/config.yaml:/config.yaml:ro" \
-    ghcr.io/datarocks-ag/postgres-provisioner:2.0
+    -v "$PWD/migrations:/migrations:ro" \
+    ghcr.io/datarocks-ag/postgres-provisioner:<version> --validate
 ```
 
-A valid config gets as far as connecting; stop it with Ctrl-C once you see the retry warning:
+A valid config ends with:
 
 ```json
-{"level":"INFO","msg":"Starting postgres-provisioner","version":"2.0.0"}
-{"level":"INFO","msg":"Loading configuration","path":"/config.yaml"}
-{"level":"INFO","msg":"Configuration loaded","roles":2,"databases":1}
-{"level":"INFO","msg":"Connecting to PostgreSQL","host":"localhost","port":"5432","database":"postgres"}
-{"level":"WARN","msg":"PostgreSQL not ready, retrying","attempt":1,"max_retries":15,"delay":1000000000,"error":"…"}
+{"level":"INFO","msg":"Configuration is valid"}
 ```
 
-An invalid config ends after the third line with exit code `1`:
+An invalid one exits with `1`:
 
 ```json
-{"level":"ERROR","msg":"Failed to load configuration","error":"validating config: databases[0].owner: role \"shop\" is not declared in roles"}
+{"level":"ERROR","msg":"Configuration is invalid","error":"validating config: databases[0].owner: role \"shop\" is not declared in roles"}
 ```
 
-To also preview the changes, use `--dry-run` against a real server.
+To also preview the changes against a real server, use `--dry-run`.
 
-Further reading: [Validation](configuration.md#validation), [Dry-run](concepts.md#dry-run)
+Further reading: [CLI flags](deployment.md#cli-flags), [Validation](configuration.md#validation), [Dry-run](concepts.md#dry-run)
 
 ## Configuration errors
 
@@ -446,8 +440,9 @@ Further reading: [Connect over TLS](howto/connect-over-tls.md),
 
 ### Why was my migration file ignored?
 
-Because its name doesn't match `V<n>__<description>.sql` or `R<n>__<description>.sql`; other
-files are skipped without a log line.
+Because its name doesn't match `V<n>__<description>.sql` or `R<n>__<description>.sql`. A
+`.sql` file that doesn't match is skipped with a warning; other files are skipped without
+one.
 
 Note the two underscores and the upper-case `V` or `R`: `V1_create.sql` and
 `v1__create.sql` are ignored. Files that do match are checked: an empty file and two files
@@ -458,6 +453,12 @@ migrations/shop/
 ├── V0001__create_products.sql     # applied once
 ├── R0001__product_view.sql        # re-applied when it changes
 └── V0002_add_price.sql            # ignored: one underscore
+```
+
+The skipped file shows up as a warning in the run's log:
+
+```json
+{"level":"WARN","msg":"Ignoring SQL file that doesn't match the migration naming pattern","directory":"/migrations/shop","file":"V0002_add_price.sql","expected":"V<version>__<description>.sql or R<version>__<description>.sql"}
 ```
 
 Further reading: [Migrations](configuration.md#migrations)
@@ -528,12 +529,28 @@ Further reading: [When the application runs its own migrations](howto/app-migrat
 
 ### Can two provisioners run at the same time?
 
-Avoid it: there is no lock between runs.
+Yes, but they run one after the other: a run takes an advisory lock on the server, and a
+second run waits until the first one finishes.
 
-Two concurrent runs may both try to create the same role or apply the same migration, and
-one of them fails. Run a single instance per server: one Compose service, or one Kubernetes
-Job rather than an init container in a Deployment with several replicas. A failed run can be
-retried.
+Without the lock, two runs could both try to create the same role or apply the same
+migration. The waiting run logs one line and then blocks; `SIGTERM` or a Kubernetes Job
+deadline still stops it. If a run is killed, PostgreSQL releases its lock with the session.
+
+```json
+{"level":"INFO","msg":"Waiting for another provisioner run to finish"}
+{"level":"INFO","msg":"Acquired the provisioner run lock"}
+```
+
+The lock lives in the database the provisioner connects to (`POSTGRES_DB`), so runs only
+wait for each other when they use the same `POSTGRES_DB`. To see which session holds it:
+
+```sql
+SELECT pid, usename, application_name, backend_start
+FROM pg_locks JOIN pg_stat_activity USING (pid)
+WHERE locktype = 'advisory' AND classid = 28775 AND objid = 1886547830;
+```
+
+Safe to run anywhere; it only reads. `classid` and `objid` are the upper and lower 32 bits of the lock key.
 
 Further reading: [Kubernetes](deployment.md#kubernetes)
 
@@ -561,8 +578,8 @@ Further reading: [Docker Compose](deployment.md#docker-compose)
 
 ### Which PostgreSQL versions are supported?
 
-PostgreSQL 16 is the version the integration tests run against; other versions aren't
-tested.
+PostgreSQL 16, 17 and 18: CI runs the integration tests against each of them. Older
+versions aren't tested.
 
 Version-specific behavior, such as the membership rules in 16+, is called out in the
 reference.

@@ -165,7 +165,7 @@ $ postgres-provisioner
 | `POSTGRES_HOST` | `localhost` | Server host |
 | `POSTGRES_PORT` | `5432` | Server port |
 | `POSTGRES_DB` | `postgres` | Database for the admin connection |
-| `POSTGRES_SSLMODE` | `disable` | `disable`, `require`, `verify-ca` or `verify-full` ([details](https://www.postgresql.org/docs/current/libpq-ssl.html)) |
+| `POSTGRES_SSLMODE` | `disable` | `disable`, `require`, `verify-ca` or `verify-full` ([details](https://www.postgresql.org/docs/current/libpq-ssl.html)). Left unset with a host other than `localhost`, a loopback address or a socket directory, the run logs a warning; set it explicitly, even to `disable`, to silence it. |
 | `PGHELPER_CONFIG_PATH` | `./config.yaml` | Path to the YAML config |
 | `MIGRATIONS_ENABLED` | `true` | `false` skips all migrations |
 | `DRY_RUN` | `false` | `true` logs mutations instead of executing them |
@@ -184,6 +184,7 @@ without certificates.
 |---|---|---|
 | `--dry-run` | `DRY_RUN` | Log every mutation instead of executing it ([details](concepts.md#dry-run)) |
 | `--migrations` | `MIGRATIONS_ENABLED` | `--migrations=false` skips migrations |
+| `--validate` | | Validate the config and the migration files, then exit without connecting. Needs no `POSTGRES_*` variables. With `--migrations=false`, migration directories aren't checked. |
 | `--version` | | Print the version and exit |
 
 Flags take precedence over their environment variables.

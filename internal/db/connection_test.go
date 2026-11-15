@@ -171,3 +171,30 @@ func TestRedactConnError(t *testing.T) {
 		})
 	}
 }
+
+func TestUnencryptedRemoteConnection(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		sslMode  string
+		explicit bool
+		want     bool
+	}{
+		{"defaulted disable to a remote host", "db.example.com", "disable", false, true},
+		{"defaulted disable to a Compose service", "postgres", "disable", false, true},
+		{"explicit disable is a deliberate choice", "db.example.com", "disable", true, false},
+		{"TLS enabled", "db.example.com", "require", false, false},
+		{"localhost", "localhost", "disable", false, false},
+		{"IPv4 loopback", "127.0.0.1", "disable", false, false},
+		{"IPv6 loopback", "::1", "disable", false, false},
+		{"Unix socket directory", "/var/run/postgresql", "disable", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ConnConfig{Host: tt.host, SSLMode: tt.sslMode}
+			if got := cfg.UnencryptedRemoteConnection(tt.explicit); got != tt.want {
+				t.Errorf("UnencryptedRemoteConnection(%v) = %v, want %v", tt.explicit, got, tt.want)
+			}
+		})
+	}
+}

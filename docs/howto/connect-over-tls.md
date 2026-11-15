@@ -8,7 +8,9 @@ Security), with the server certificate verified against a certificate authority 
 Your database is a managed service such as Amazon RDS, Google Cloud SQL or Azure Database for
 PostgreSQL, or a self-hosted server that only accepts encrypted connections. The provisioner
 connects without TLS by default (`POSTGRES_SSLMODE=disable`), so against such a server it
-either fails to connect or, with a weak mode, connects without checking who it talks to.
+either fails to connect or, with a weak mode, connects without checking who it talks to. When
+the mode is left at its default for a non-local host, the run warns with `Connecting without
+TLS: POSTGRES_SSLMODE defaults to disable`.
 
 ## What you need to know first
 

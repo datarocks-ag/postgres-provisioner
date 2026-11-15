@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/lib/pq"
 
@@ -81,6 +82,11 @@ func discoverMigrations(directory string) ([]MigrationFile, error) {
 
 		matches := migrationFilePattern.FindStringSubmatch(entry.Name())
 		if matches == nil {
+			if strings.EqualFold(filepath.Ext(entry.Name()), ".sql") {
+				slog.Warn("Ignoring SQL file that doesn't match the migration naming pattern",
+					"directory", directory, "file", entry.Name(),
+					"expected", "V<version>__<description>.sql or R<version>__<description>.sql")
+			}
 			continue
 		}
 
