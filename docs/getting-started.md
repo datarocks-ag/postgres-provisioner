@@ -273,9 +273,9 @@ Two things to notice:
 
 - Passwords are redacted. They are redacted in every log line, not only in dry-run.
 - The preview includes statements that change nothing, like `ALTER ROLE "shop_app"`.
-  Statements that are idempotent on the server (role attributes, ownership, `GRANT`) are
-  issued on every run. Settings, memberships, revokes, extensions, migrations and publications
-  are compared with the current state first. So a dry-run shows what *will be executed*, which
+  Statements that are idempotent on the server (passwords, ownership, `GRANT`) are issued on
+  every run. Role attributes, settings, memberships, revokes, extensions, migrations and
+  publications are compared with the current state first. So a dry-run shows what *will be executed*, which
   is a superset of what will *change*. [How it works](concepts.md#dry-run) explains which is
   which.
 

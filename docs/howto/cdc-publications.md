@@ -156,9 +156,9 @@ Tables:
 
 - **The run fails on `REPLICATION`.** Only a superuser, or on PostgreSQL 16 and later a role
   that has `REPLICATION` itself, may give a role that attribute
-  ([CREATE ROLE](https://www.postgresql.org/docs/current/sql-createrole.html)). With the
-  default `strategy: update`, the provisioner sends the `REPLICATION` clause on every run, so
-  an admin without that right fails **every run**, not only when the role is created. On
+  ([CREATE ROLE](https://www.postgresql.org/docs/current/sql-createrole.html)). The
+  provisioner sends the clause only when the role doesn't have the attribute yet, so an admin
+  without that right fails when it creates the role or turns the attribute on. On
   managed services that don't hand out `REPLICATION` (e.g. Amazon RDS), leave out
   `replication: true` and use the provider's role instead: `member_of: [rds_replication]`.
   See [Privileges the admin user needs](../deployment.md#privileges-the-admin-user-needs).

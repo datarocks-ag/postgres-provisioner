@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Schema owner under `strategy: create`** — a schema's `owner` (or the database `owner`) was never applied with `strategy: create`, even in a database created in the same run, so the schema stayed with the admin user. It is now set; an existing database is still skipped entirely.
+- **Unchanged role attributes are no longer re-sent** — with `strategy: update`, every configured role option was sent in `ALTER ROLE` on every run. PostgreSQL checks the privilege for `REPLICATION`, `SUPERUSER`, `BYPASSRLS`, `CREATEDB` and `CREATEROLE` whenever the clause appears, so a non-superuser admin (e.g. on a managed service) failed every run, not only when the attribute changed. Options are now compared with `pg_roles` first and only differing ones are sent; a configured password is still set on every run.
 
 ## [2.0.0] - 2026-11-12
 

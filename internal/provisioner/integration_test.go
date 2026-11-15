@@ -1498,6 +1498,94 @@ databases:
 	}
 }
 
+// TestIntegrationUnchangedRoleAttributesAreNotResent runs as a non-superuser admin with
+// CREATEROLE against a role that already has REPLICATION. PostgreSQL checks the privilege for
+// REPLICATION (and SUPERUSER, BYPASSRLS, CREATEDB, CREATEROLE) whenever the clause is sent,
+// even if the value doesn't change, so re-sending it made every run fail.
+func TestIntegrationUnchangedRoleAttributesAreNotResent(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE ROLE cdc LOGIN REPLICATION CONNECTION LIMIT 2 VALID UNTIL '2030-01-01 00:00:00+00'`,
+		`CREATE ROLE limited_admin LOGIN CREATEROLE PASSWORD 'limitedpass'`,
+		`GRANT cdc TO limited_admin WITH ADMIN OPTION`,
+	} {
+		if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	limitedCfg := connCfg
+	limitedCfg.User = "limited_admin"
+	limitedCfg.Password = "limitedpass"
+	limitedDB := connectAs(t, connCfg, "limited_admin", "limitedpass", "postgres")
+
+	logs, err := runProvisioning(t, limitedDB, limitedCfg, provisioner.DefaultOptions(), `
+roles:
+  - name: "cdc"
+    options:
+      login: true
+      replication: true
+      connection_limit: 2
+      valid_until: "2030-01-01T00:00:00Z"
+`)
+	if err != nil {
+		t.Fatalf("provisioning failed: %v\n%s", err, logs)
+	}
+	if !strings.Contains(logs, "No changes to apply for role") {
+		t.Errorf("expected no ALTER ROLE for an unchanged role, logs:\n%s", logs)
+	}
+}
+
+// TestIntegrationChangedRoleAttributesAreApplied verifies that only the attributes that
+// differ are sent, and that they take effect.
+func TestIntegrationChangedRoleAttributesAreApplied(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	if _, err := adminDB.Exec(`CREATE ROLE reporter LOGIN CONNECTION LIMIT 5`); err != nil {
+		t.Fatal(err)
+	}
+
+	logs, err := runProvisioning(t, adminDB, connCfg, provisioner.Options{DryRun: true, MigrationsEnabled: true}, `
+roles:
+  - name: "reporter"
+    options:
+      login: true
+      connection_limit: 10
+      valid_until: "2030-01-01T00:00:00Z"
+`)
+	if err != nil {
+		t.Fatalf("dry-run failed: %v", err)
+	}
+	if !strings.Contains(logs, `ALTER ROLE \"reporter\" WITH CONNECTION LIMIT 10 VALID UNTIL '2030-01-01T00:00:00Z'`) {
+		t.Errorf("expected only the changed attributes in the ALTER ROLE preview, logs:\n%s", logs)
+	}
+
+	if _, err := runProvisioning(t, adminDB, connCfg, provisioner.DefaultOptions(), `
+roles:
+  - name: "reporter"
+    options:
+      login: true
+      connection_limit: 10
+      valid_until: "2030-01-01T00:00:00Z"
+`); err != nil {
+		t.Fatalf("provisioning failed: %v", err)
+	}
+	var limit int
+	var validUntilMatches bool
+	if err := adminDB.QueryRow(
+		`SELECT rolconnlimit, rolvaliduntil = '2030-01-01T00:00:00Z'::timestamptz FROM pg_roles WHERE rolname = 'reporter'`,
+	).Scan(&limit, &validUntilMatches); err != nil {
+		t.Fatal(err)
+	}
+	if limit != 10 || !validUntilMatches {
+		t.Errorf("connection limit = %d, valid until matches = %v; want 10, true", limit, validUntilMatches)
+	}
+}
+
 // TestIntegrationTableAndColumnGrantsAfterMigrations provisions a fresh database whose
 // tables are created by a migration in the same run, then grants on specific tables and
 // columns, including case-sensitive quoted identifiers.

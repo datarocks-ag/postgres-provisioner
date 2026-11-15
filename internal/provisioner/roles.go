@@ -98,6 +98,10 @@ func (p *Provisioner) createRole(ctx context.Context, role config.Role) error {
 	return err
 }
 
+// alterRole updates an existing role. Only options whose stored value differs are sent:
+// PostgreSQL checks the privilege for attributes like REPLICATION or SUPERUSER whenever the
+// clause appears, so re-sending an unchanged one fails for a non-superuser admin. The
+// password can't be compared and is always sent when configured.
 func (p *Provisioner) alterRole(ctx context.Context, role config.Role) error {
 	var clauses []string
 
@@ -105,7 +109,11 @@ func (p *Provisioner) alterRole(ctx context.Context, role config.Role) error {
 		clauses = append(clauses, "PASSWORD "+quoteLiteral(role.Password))
 	}
 
-	clauses = append(clauses, roleOptionsClauses(role.Options)...)
+	changed, err := changedRoleOptions(ctx, p.adminDB, role.Name, role.Options)
+	if err != nil {
+		return fmt.Errorf("reading attributes of role %q: %w", role.Name, err)
+	}
+	clauses = append(clauses, roleOptionsClauses(changed)...)
 
 	if len(clauses) == 0 {
 		slog.Info("No changes to apply for role", "role", role.Name)
@@ -113,8 +121,54 @@ func (p *Provisioner) alterRole(ctx context.Context, role config.Role) error {
 	}
 
 	query := "ALTER ROLE " + quoteIdentifier(role.Name) + " WITH " + strings.Join(clauses, " ")
-	_, err := p.execMutation(ctx, p.adminDB, query)
+	_, err = p.execMutation(ctx, p.adminDB, query)
 	return err
+}
+
+// changedRoleOptions returns the subset of desired whose values differ from the role's stored
+// attributes; options that are unset in desired stay unset. valid_until is compared by
+// PostgreSQL, which parses the configured timestamp the same way ALTER ROLE does.
+func changedRoleOptions(ctx context.Context, db *sql.DB, name string, desired config.RoleOptions) (config.RoleOptions, error) {
+	var current struct {
+		login, superuser, createDB, createRole, inherit, replication, bypassRLS bool
+		connectionLimit                                                         int
+		validUntilMatches                                                       bool
+	}
+	err := db.QueryRowContext(ctx, `
+SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication,
+       rolbypassrls, rolconnlimit,
+       $2::text IS NULL OR rolvaliduntil IS NOT DISTINCT FROM $2::timestamptz
+FROM pg_roles WHERE rolname = $1`, name, desired.ValidUntil,
+	).Scan(&current.login, &current.superuser, &current.createDB, &current.createRole,
+		&current.inherit, &current.replication, &current.bypassRLS, &current.connectionLimit,
+		&current.validUntilMatches)
+	if err != nil {
+		return config.RoleOptions{}, err
+	}
+
+	changed := config.RoleOptions{
+		Login:       changedBool(desired.Login, current.login),
+		Superuser:   changedBool(desired.Superuser, current.superuser),
+		CreateDB:    changedBool(desired.CreateDB, current.createDB),
+		CreateRole:  changedBool(desired.CreateRole, current.createRole),
+		Inherit:     changedBool(desired.Inherit, current.inherit),
+		Replication: changedBool(desired.Replication, current.replication),
+		BypassRLS:   changedBool(desired.BypassRLS, current.bypassRLS),
+	}
+	if desired.ConnectionLimit != nil && *desired.ConnectionLimit != current.connectionLimit {
+		changed.ConnectionLimit = desired.ConnectionLimit
+	}
+	if !current.validUntilMatches {
+		changed.ValidUntil = desired.ValidUntil
+	}
+	return changed, nil
+}
+
+func changedBool(desired *bool, current bool) *bool {
+	if desired == nil || *desired == current {
+		return nil
+	}
+	return desired
 }
 
 func roleOptionsClauses(opts config.RoleOptions) []string {
