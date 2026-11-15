@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
@@ -2479,5 +2480,72 @@ databases:
 	}
 	if !everythingAll || listedAll {
 		t.Errorf("puballtables changed: everything=%v listed=%v, want true/false", everythingAll, listedAll)
+	}
+}
+
+// TestIntegrationRunLockMakesSecondRunWait verifies that a second run waits while another
+// holds the lock, and proceeds once it is released.
+func TestIntegrationRunLockMakesSecondRunWait(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	release, err := provisioner.AcquireRunLock(ctx, adminDB)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+
+	logs := captureLogs(t)
+	secondDB := connectAs(t, connCfg, connCfg.User, connCfg.Password, "postgres")
+	acquired := make(chan func(), 1)
+	go func() {
+		releaseSecond, err := provisioner.AcquireRunLock(ctx, secondDB)
+		if err != nil {
+			t.Errorf("second lock: %v", err)
+			return
+		}
+		acquired <- releaseSecond
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second run acquired the lock while the first still held it")
+	case <-time.After(time.Second):
+	}
+
+	release()
+	select {
+	case releaseSecond := <-acquired:
+		releaseSecond()
+	case <-time.After(10 * time.Second):
+		t.Fatal("second run didn't acquire the lock after the first released it")
+	}
+	// Read only after the goroutine handed over its result, so its log writes are complete.
+	if !strings.Contains(logs.String(), "Waiting for another provisioner run to finish") {
+		t.Errorf("expected a waiting log line, logs:\n%s", logs.String())
+	}
+}
+
+// TestIntegrationRunLockWaitStopsOnCancel verifies that a waiting run stops when its context
+// is canceled, e.g. by SIGTERM or a Kubernetes Job deadline.
+func TestIntegrationRunLockWaitStopsOnCancel(t *testing.T) {
+	adminDB, connCfg, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	release, err := provisioner.AcquireRunLock(context.Background(), adminDB)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	defer release()
+
+	secondDB := connectAs(t, connCfg, connCfg.User, connCfg.Password, "postgres")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := provisioner.AcquireRunLock(ctx, secondDB); err == nil {
+		t.Fatal("expected an error when the context is canceled while waiting")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("cancellation took %s", waited)
 	}
 }

@@ -12,7 +12,9 @@ production.
    (e.g. `databases[0].grants[2].privileges[0]`). **Nothing has touched the database yet**,
    so a broken config never leaves a half-provisioned server.
 2. **Connect** as the admin user, retrying with backoff until Postgres accepts connections
-   (up to 5 minutes). See [Connection retry](deployment.md#connection-retry).
+   (up to 5 minutes). See [Connection retry](deployment.md#connection-retry). Then take the
+   run lock: if another provisioner run is connected to the same database, wait until it
+   finishes.
 3. **Provision** in a fixed order (below). Each step reads the current state and only does
    what's needed.
 4. **Exit** with code `0` on success, or `1` at the first error. A failed run can be fixed

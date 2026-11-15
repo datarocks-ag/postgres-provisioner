@@ -93,11 +93,20 @@ func main() {
 	}
 	defer adminDB.Close()
 
+	releaseLock, err := provisioner.AcquireRunLock(ctx, adminDB)
+	if err != nil {
+		slog.Error("Failed to acquire the run lock", "error", err)
+		os.Exit(1)
+	}
+
 	p := provisioner.New(adminDB, connCfg, cfg, provisioner.Options{
 		MigrationsEnabled: *migrationsEnabled,
 		DryRun:            *dryRun,
 	})
-	if err := p.Run(ctx); err != nil {
+	err = p.Run(ctx)
+	// Released explicitly: os.Exit below skips deferred calls.
+	releaseLock()
+	if err != nil {
 		slog.Error("Provisioning failed", "error", err)
 		os.Exit(1)
 	}

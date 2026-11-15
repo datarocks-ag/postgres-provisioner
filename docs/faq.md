@@ -528,12 +528,28 @@ Further reading: [When the application runs its own migrations](howto/app-migrat
 
 ### Can two provisioners run at the same time?
 
-Avoid it: there is no lock between runs.
+Yes, but they run one after the other: a run takes an advisory lock on the server, and a
+second run waits until the first one finishes.
 
-Two concurrent runs may both try to create the same role or apply the same migration, and
-one of them fails. Run a single instance per server: one Compose service, or one Kubernetes
-Job rather than an init container in a Deployment with several replicas. A failed run can be
-retried.
+Without the lock, two runs could both try to create the same role or apply the same
+migration. The waiting run logs one line and then blocks; `SIGTERM` or a Kubernetes Job
+deadline still stops it. If a run is killed, PostgreSQL releases its lock with the session.
+
+```json
+{"level":"INFO","msg":"Waiting for another provisioner run to finish"}
+{"level":"INFO","msg":"Acquired the provisioner run lock"}
+```
+
+The lock lives in the database the provisioner connects to (`POSTGRES_DB`), so runs only
+wait for each other when they use the same `POSTGRES_DB`. To see which session holds it:
+
+```sql
+SELECT pid, usename, application_name, backend_start
+FROM pg_locks JOIN pg_stat_activity USING (pid)
+WHERE locktype = 'advisory' AND classid = 28775 AND objid = 1886547830;
+```
+
+Safe to run anywhere; it only reads. `classid` and `objid` are the upper and lower 32 bits of the lock key.
 
 Further reading: [Kubernetes](deployment.md#kubernetes)
 
