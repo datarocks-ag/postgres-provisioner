@@ -12,6 +12,13 @@ updates:
       testcontainers:
         patterns:
           - "github.com/testcontainers/testcontainers-go*"
+      # Security updates mostly hit indirect dependencies pulled in by testcontainers
+      # and the golangci-lint tool (otel, moby, compress). One PR per CVE produces a
+      # pile of conflicting go.sum changes, so batch them.
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
@@ -19,6 +26,13 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci"
+    groups:
+      # Actions don't pin each other, and nearly every bump is a major (Node
+      # runtime). CI exercises them all, so one PR is enough to review. Grouping
+      # by owner would leave codecov, trivy and goreleaser as separate PRs.
+      github-actions:
+        patterns:
+          - "*"
     ignore:
       # Dependabot proposed a non-existent major "v2201" for this action (d0007cb),
       # which broke the release workflow. Major updates need a manual review.
