@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`--validate`** — validates the config and every migrations directory (naming, empty files, duplicate versions), then exits with `0` or `1` without connecting. Needs no `POSTGRES_*` variables, so it can run in CI before a deploy. With `--migrations=false`, migration directories aren't checked.
+- **Warning for unencrypted connections** — when `POSTGRES_SSLMODE` is left at its default `disable` and the host isn't `localhost`, a loopback address or a socket directory, the run logs a warning before connecting. Setting `POSTGRES_SSLMODE` explicitly, even to `disable`, silences it. The default itself is unchanged.
 - **Warning for misnamed migration files** — a `.sql` file in a migrations directory whose name doesn't match `V<n>__<description>.sql` or `R<n>__<description>.sql` (e.g. a single underscore) is still skipped, but now logged as a warning instead of silently.
 
 ### Changed

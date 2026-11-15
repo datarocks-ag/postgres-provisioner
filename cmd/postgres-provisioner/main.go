@@ -73,6 +73,14 @@ func main() {
 		"databases", len(cfg.Databases),
 	)
 
+	// envOrDefault above already rejected an invalid POSTGRES_SSLMODE, so only presence matters.
+	sslModeSet, _ := resolveEnv("POSTGRES_SSLMODE")
+	if connCfg.UnencryptedRemoteConnection(sslModeSet != "") {
+		slog.Warn("Connecting without TLS: POSTGRES_SSLMODE defaults to disable. "+
+			"Set POSTGRES_SSLMODE=verify-full (or require), or set it to disable explicitly to silence this warning",
+			"host", connCfg.Host)
+	}
+
 	slog.Info("Connecting to PostgreSQL",
 		"host", connCfg.Host,
 		"port", connCfg.Port,

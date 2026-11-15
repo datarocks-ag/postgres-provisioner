@@ -62,6 +62,23 @@ func sessionOptions(params map[string]string) string {
 	return strings.Join(switches, " ")
 }
 
+// UnencryptedRemoteConnection reports whether the connection would send credentials over
+// the network without TLS because sslmode was left at its default of "disable".
+// sslModeExplicit is whether the user set the mode themselves; an explicit "disable" is a
+// deliberate choice. Loopback addresses and Unix socket directories don't leave the host.
+func (c ConnConfig) UnencryptedRemoteConnection(sslModeExplicit bool) bool {
+	if sslModeExplicit || c.SSLMode != "disable" {
+		return false
+	}
+	if c.Host == "localhost" || strings.HasPrefix(c.Host, "/") {
+		return false
+	}
+	if ip := net.ParseIP(c.Host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
 // DSN returns the PostgreSQL connection string. User, password, and database
 // name are percent-encoded via net/url so credentials containing URL-special
 // characters (e.g. '@' or ':') don't corrupt the parsed host/port.
