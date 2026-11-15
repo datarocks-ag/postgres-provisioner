@@ -184,6 +184,7 @@ without certificates.
 |---|---|---|
 | `--dry-run` | `DRY_RUN` | Log every mutation instead of executing it ([details](concepts.md#dry-run)) |
 | `--migrations` | `MIGRATIONS_ENABLED` | `--migrations=false` skips migrations |
+| `--validate` | | Validate the config and the migration files, then exit without connecting. Needs no `POSTGRES_*` variables. With `--migrations=false`, migration directories aren't checked. |
 | `--version` | | Print the version and exit |
 
 Flags take precedence over their environment variables.

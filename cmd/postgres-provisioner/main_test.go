@@ -145,3 +145,48 @@ func TestParseBoolEnv(t *testing.T) {
 		})
 	}
 }
+
+func writeValidateConfig(t *testing.T, migrationsDir string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := "roles:\n  - name: shop_app\ndatabases:\n  - name: shop\n    owner: shop_app\n" +
+		"    migrations:\n      directory: " + migrationsDir + "\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestValidateConfigAcceptsValidConfigAndMigrations(t *testing.T) {
+	migrations := t.TempDir()
+	if err := os.WriteFile(filepath.Join(migrations, "V1__init.sql"), []byte("SELECT 1;"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConfig(writeValidateConfig(t, migrations), true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateConfigReportsMissingMigrationsDirectory(t *testing.T) {
+	if err := validateConfig(writeValidateConfig(t, "/does/not/exist"), true); err == nil {
+		t.Fatal("expected an error for a missing migrations directory")
+	}
+}
+
+func TestValidateConfigSkipsMigrationsWhenDisabled(t *testing.T) {
+	if err := validateConfig(writeValidateConfig(t, "/does/not/exist"), false); err != nil {
+		t.Fatalf("migrations disabled: unexpected error: %v", err)
+	}
+}
+
+func TestValidateConfigReportsInvalidConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("databases:\n  - name: shop\n    owner: nobody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConfig(path, true); err == nil {
+		t.Fatal("expected an error for an undeclared owner")
+	}
+}

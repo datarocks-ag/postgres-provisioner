@@ -149,43 +149,37 @@ Further reading: [Database options](configuration.md#database-options)
 
 ### Can I validate a config without a database?
 
-Not with a separate command, but the provisioner loads and validates the config before it
-connects, so a run against no server shows whether the config is valid.
+Yes: run with `--validate`. It loads and validates the config, checks every migrations
+directory and its files, and exits with `0` or `1` without connecting to a server.
 
-The admin credentials are read before the config, so `POSTGRES_USER` and
-`POSTGRES_PASSWORD` (or their `_FILE` variants) must be set to any value. Validation stops at
-the first error, except that all unresolved `${VAR}` references are reported together.
-Migration files and the migrations directory are only read during a run, so this check
-doesn't cover them. Run the image without a database; it's safe anywhere, because inside the
-container `localhost:5432` has no server:
+It needs no `POSTGRES_*` variables, only the variables the config itself references.
+Validation stops at the first error, except that all unresolved `${VAR}` references are
+reported together. It is read-only and safe to run anywhere, for example in CI before a
+deploy:
 
 ```console
 $ docker run --rm \
-    -e POSTGRES_USER=check -e POSTGRES_PASSWORD=check \
     -e PGHELPER_CONFIG_PATH=/config.yaml \
     -v "$PWD/config.yaml:/config.yaml:ro" \
-    ghcr.io/datarocks-ag/postgres-provisioner:2.0
+    -v "$PWD/migrations:/migrations:ro" \
+    ghcr.io/datarocks-ag/postgres-provisioner:<version> --validate
 ```
 
-A valid config gets as far as connecting; stop it with Ctrl-C once you see the retry warning:
+A valid config ends with:
 
 ```json
-{"level":"INFO","msg":"Starting postgres-provisioner","version":"2.0.0"}
-{"level":"INFO","msg":"Loading configuration","path":"/config.yaml"}
-{"level":"INFO","msg":"Configuration loaded","roles":2,"databases":1}
-{"level":"INFO","msg":"Connecting to PostgreSQL","host":"localhost","port":"5432","database":"postgres"}
-{"level":"WARN","msg":"PostgreSQL not ready, retrying","attempt":1,"max_retries":15,"delay":1000000000,"error":"…"}
+{"level":"INFO","msg":"Configuration is valid"}
 ```
 
-An invalid config ends after the third line with exit code `1`:
+An invalid one exits with `1`:
 
 ```json
-{"level":"ERROR","msg":"Failed to load configuration","error":"validating config: databases[0].owner: role \"shop\" is not declared in roles"}
+{"level":"ERROR","msg":"Configuration is invalid","error":"validating config: databases[0].owner: role \"shop\" is not declared in roles"}
 ```
 
-To also preview the changes, use `--dry-run` against a real server.
+To also preview the changes against a real server, use `--dry-run`.
 
-Further reading: [Validation](configuration.md#validation), [Dry-run](concepts.md#dry-run)
+Further reading: [CLI flags](deployment.md#cli-flags), [Validation](configuration.md#validation), [Dry-run](concepts.md#dry-run)
 
 ## Configuration errors
 

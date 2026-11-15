@@ -25,6 +25,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	migrationsEnabled := flag.Bool("migrations", migrationsDefault, "enable/disable migrations (env: MIGRATIONS_ENABLED)")
 	dryRun := flag.Bool("dry-run", dryRunDefault, "log mutations as a preview without executing them (env: DRY_RUN)")
+	validateOnly := flag.Bool("validate", false, "validate the config and migration files, then exit without connecting")
 	flag.Parse()
 
 	if *showVersion {
@@ -33,6 +34,17 @@ func main() {
 	}
 
 	slog.Info("Starting postgres-provisioner", "version", version)
+
+	if *validateOnly {
+		configPath := envOrDefault("PGHELPER_CONFIG_PATH", "./config.yaml")
+		slog.Info("Validating configuration", "path", configPath, "migrations", *migrationsEnabled)
+		if err := validateConfig(configPath, *migrationsEnabled); err != nil {
+			slog.Error("Configuration is invalid", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("Configuration is valid")
+		return
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -83,6 +95,19 @@ func main() {
 	}
 
 	slog.Info("postgres-provisioner finished successfully")
+}
+
+// validateConfig loads and validates the config at path and, when migrations are enabled,
+// checks every migrations directory and its files. It needs no database or credentials.
+func validateConfig(path string, migrationsEnabled bool) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if !migrationsEnabled {
+		return nil
+	}
+	return provisioner.ValidateMigrations(cfg)
 }
 
 func setupLogging() {
