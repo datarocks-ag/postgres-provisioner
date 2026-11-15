@@ -68,7 +68,7 @@ services:
     secrets: [pg_admin_password]
 
   postgres-provisioner:
-    image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
+    image: ghcr.io/datarocks-ag/postgres-provisioner:2.1
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_USER: admin
@@ -100,7 +100,7 @@ them.
 ```yaml
       containers:
         - name: postgres-provisioner
-          image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
+          image: ghcr.io/datarocks-ag/postgres-provisioner:2.1
           env:
             - name: POSTGRES_HOST
               value: postgres

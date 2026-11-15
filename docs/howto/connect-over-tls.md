@@ -42,7 +42,7 @@ In Docker Compose, add the file as a read-only volume:
 
 ```yaml
   postgres-provisioner:
-    image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
+    image: ghcr.io/datarocks-ag/postgres-provisioner:2.1
     environment:
       POSTGRES_HOST: db.example.com
       POSTGRES_SSLMODE: verify-full

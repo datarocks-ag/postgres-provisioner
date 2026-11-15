@@ -11,8 +11,8 @@ Images are published to `ghcr.io/datarocks-ag/postgres-provisioner` for `linux/a
 
 | Tag | Points to | Use it for |
 |---|---|---|
-| `2.0.0` | exactly that release | production: reproducible |
-| `2.0` | latest patch release of 2.0 | production: picks up fixes |
+| `2.1.0` | exactly that release | production: reproducible |
+| `2.1` | latest patch release of 2.1 | production: picks up fixes |
 | `latest` | latest release | trying things out |
 | `develop` | the `develop` branch | testing unreleased changes |
 | `sha-<commit>` | a single commit | debugging |
@@ -42,7 +42,7 @@ services:
       retries: 10
 
   postgres-provisioner:
-    image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
+    image: ghcr.io/datarocks-ag/postgres-provisioner:2.1
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,7 +104,7 @@ spec:
         runAsUser: 65532
       containers:
         - name: postgres-provisioner
-          image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
+          image: ghcr.io/datarocks-ag/postgres-provisioner:2.1
           env:
             - { name: POSTGRES_HOST, value: postgres.database.svc }
             - { name: POSTGRES_SSLMODE, value: verify-full }

@@ -11,7 +11,7 @@ read-only access for their reports. Everything runs in Docker Compose.
 You'll need Docker with Compose v2. Each step builds on the previous one, so keep the files
 you create.
 
-> **Versions:** this guide uses image tag `2.0`. All tags are listed under
+> **Versions:** this guide uses image tag `2.1`. All tags are listed under
 > [Deployment → Image tags](deployment.md#image-tags).
 
 ## Step 1: A role and a database
@@ -55,7 +55,7 @@ services:
       retries: 10
 
   postgres-provisioner:
-    image: ghcr.io/datarocks-ag/postgres-provisioner:2.0
+    image: ghcr.io/datarocks-ag/postgres-provisioner:2.1
     depends_on:
       postgres:
         condition: service_healthy
