@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Go 1.27** — CI and release binaries are now built with Go 1.27, like the Docker image already was (Go 1.25 is no longer supported upstream). Building from source requires Go 1.26 or later.
 - **Go dependencies updated** — `github.com/testcontainers/testcontainers-go` and `/modules/postgres` 0.44.0 → 0.45.0 (integration tests only; not part of the binary).
 - **golangci-lint 2.11.4 → 2.15.0** — 2.11.4 panics while analyzing Go 1.27's standard library on Linux (`buildir: unexpected expr: *ast.KeyValueExpr`). Development tool only; the binary's dependencies are unchanged. The `go-header`/`sloglint` pins from 1.1.0 are no longer needed (`sloglint` moves to 0.12.0).
+- **Documentation reviewed against the code** — the FAQ and the how-to guides were checked claim by claim and corrected: an empty `${VAR:-}` default is rejected for passwords, default privileges cover a schema owner only when one is configured, `pg_stat_statements` must live in the database the exporter connects to (the `postgres` database is reserved), and example configs now declare every role they reference. Every how-to now has a verification step and pitfalls, and the FAQ gained answers on configuration errors, migration naming and checksums, expiring access and dropping roles. New how-tos: connecting over TLS, separating the migration owner from the application role, group roles, and role and database defaults.
 
 ## [2.0.0] - 2026-11-12
 
