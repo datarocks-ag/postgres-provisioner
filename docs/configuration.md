@@ -306,7 +306,7 @@ with `permission denied for sequence`. Identity columns (`GENERATED ... AS IDENT
   | configured and enabled | provisioning fails, naming the missing tables (dry-run only logs them) |
   | disabled (`MIGRATIONS_ENABLED=false`) or not configured | warning; the grant is applied to the existing tables, the next run picks up the rest |
 
-  See [When the application runs its own migrations](howto/app-migrations.md).
+  See [Grant access when the application runs its own migrations](howto/app-migrations.md).
 
 ### Revokes
 
@@ -405,7 +405,7 @@ Connect:
   `update`/`delete`.
 - Replication slots are not managed: CDC consumers create their own.
 
-See [Change data capture with publications](howto/cdc-publications.md).
+See [Stream table changes with publications](howto/cdc-publications.md).
 
 ## Environment variable expansion
 

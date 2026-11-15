@@ -98,11 +98,15 @@ Read in this order if you're new; jump straight to a how-to if you know what you
 | **[How it works](docs/concepts.md)** | The model behind a run: what gets reconciled, what is never touched, the order of steps, `strategy`, dry-run. |
 | **How-to guides** | Task-focused stories: |
 | &nbsp;&nbsp;[Monitor Postgres with postgres_exporter](docs/howto/monitoring.md) | A least-privilege `pg_monitor` account instead of the superuser. |
-| &nbsp;&nbsp;[Read-only and reporting users](docs/howto/read-only-users.md) | Schema-wide, table- and column-level read access. |
+| &nbsp;&nbsp;[Create read-only users](docs/howto/read-only-users.md) | Schema-wide, table- and column-level read access. |
+| &nbsp;&nbsp;[Manage access with group roles](docs/howto/manage-access-with-group-roles.md) | Grant to a group once; login roles inherit through membership. |
+| &nbsp;&nbsp;[Set role and database defaults](docs/howto/set-role-and-database-defaults.md) | `statement_timeout`, `search_path` and other session defaults per role and database. |
 | &nbsp;&nbsp;[Harden a database](docs/howto/harden-database.md) | Revoke PostgreSQL's `PUBLIC` defaults and grant access explicitly. |
 | &nbsp;&nbsp;[Manage secrets](docs/howto/secrets.md) | Docker secrets, Kubernetes secrets, password rotation. |
-| &nbsp;&nbsp;[When the application runs its own migrations](docs/howto/app-migrations.md) | Grants for tables the provisioner doesn't create. |
-| &nbsp;&nbsp;[Change data capture with publications](docs/howto/cdc-publications.md) | Logical replication for Debezium, Redpanda Connect and friends. |
+| &nbsp;&nbsp;[Connect to a managed or TLS-only server](docs/howto/connect-over-tls.md) | `POSTGRES_SSLMODE`, certificate verification and a custom CA. |
+| &nbsp;&nbsp;[Grant access when the application runs its own migrations](docs/howto/app-migrations.md) | Grants for tables the provisioner doesn't create. |
+| &nbsp;&nbsp;[Separate the migration owner from the application role](docs/howto/separate-migration-owner.md) | A schema owner for DDL, a runtime role with only the access it needs. |
+| &nbsp;&nbsp;[Stream table changes with publications](docs/howto/cdc-publications.md) | Logical replication for Debezium, Redpanda Connect and friends. |
 | **[Deployment](docs/deployment.md)** | Docker Compose, Kubernetes, binaries, environment variables, CLI flags, required privileges. |
 | **[Configuration reference](docs/configuration.md)** | Every field of the YAML file. |
 | **[FAQ](docs/faq.md)** | Questions people ask after their first week. |
