@@ -69,7 +69,7 @@ services:
   failed.
 - Don't set `restart: always` on the provisioner. It is supposed to exit.
 
-Use [Docker secrets](howto/secrets.md#docker-compose-secrets) instead of plain-text passwords
+Use [Docker secrets](howto/secrets.md#2-hand-the-files-to-the-containers-with-docker-compose) instead of plain-text passwords
 outside of local development.
 
 ## Kubernetes
