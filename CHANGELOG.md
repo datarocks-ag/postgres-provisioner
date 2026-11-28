@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Tested against PostgreSQL 19** — the integration tests now also run against PostgreSQL 19 in CI.
+- **`docker-compose.yaml` uses PostgreSQL 19** — the volume is now mounted at `/var/lib/postgresql`, as the images from 18 on expect (`PGDATA` is `/var/lib/postgresql/<major>/docker`). An existing `pgdata` volume from 16 is not upgraded; recreate it with `docker compose down -v`.
+
 ## [2.1.0] - 2026-11-15
 
 Adds `--validate` and a lock that keeps runs from overlapping, warns about unencrypted connections and misnamed migration files, and fixes schema owners under `strategy: create` and role attributes that a non-superuser admin could not re-apply. No breaking changes.
